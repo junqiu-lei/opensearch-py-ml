@@ -241,6 +241,7 @@ jobs:
     needs: [init-workflow-var, checking-out-model-hub]
     name: model-auto-tracing
     runs-on: ubuntu-latest
+    continue-on-error: true
     permissions:
       id-token: write
       contents: read
@@ -325,48 +326,10 @@ jobs:
       model_description_info: ${{ steps.model_description_info.outputs.model_description_info }}
       dryrun_output: ${{ steps.dryrun_model_uploading.outputs.dryrun_output }}
 
-  # Step 5: Ask for manual approval from the CODEOWNERS
-  manual-approval:
-    needs: [init-workflow-var, model-auto-tracing]
-    runs-on: 'ubuntu-latest'
-    permissions:
-      issues: write
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-      - name: Get Approvers
-        id: get_approvers
-        run: |
-          echo "approvers=$(cat .github/CODEOWNERS | grep @ | tr -d '* ' | sed 's/@/,/g' | sed 's/,//1')" >> $GITHUB_OUTPUT
-      - name: Create Issue Body
-        id: create_issue_body
-        run: |    
-          issue_body="Please approve or deny opensearch-py-ml model uploading:
-          
-          ${{ needs.model-auto-tracing.outputs.license_line }}
-          
-          ${{ needs.init-workflow-var.outputs.workflow_info }}
-          ${{ needs.model-auto-tracing.outputs.model_description_info }}
-          
-          ===== Dry Run of Model Uploading =====
-          ${{ needs.model-auto-tracing.outputs.dryrun_output }}"
-
-          echo "issue_body<<EOF" >> $GITHUB_OUTPUT
-          echo "${issue_body@E}" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-          echo "${issue_body@E}"
-      - uses: trstringer/manual-approval@v1
-        with:
-          secret: ${{ github.TOKEN }}
-          approvers: ${{ steps.get_approvers.outputs.approvers }}
-          minimum-approvals: 1
-          issue-title: "Upload Model to OpenSearch Model Hub (${{ github.event.inputs.model_id }})"
-          issue-body: ${{ steps.create_issue_body.outputs.issue_body }}
-          exclude-workflow-initiator-as-approver: false
-      
   # Step 6: Download the artifacts & Upload it to the S3 bucket
   model-uploading:
-    needs: [init-workflow-var, manual-approval]
+    needs: [init-workflow-var, model-auto-tracing]
+    if: always()
     runs-on: 'ubuntu-latest'
     permissions:
       id-token: write
@@ -391,127 +354,3 @@ jobs:
           echo "upload_time=$(TZ='America/Los_Angeles' date "+%Y-%m-%d %T")" >> $GITHUB_OUTPUT
     outputs:
       upload_time: ${{ steps.copying_to_bucket.outputs.upload_time }}
-   
-  # Step 7: Update MODEL_UPLOAD_HISTORY.md & supported_models.json
-  history-update:
-    needs: [init-workflow-var, model-auto-tracing, model-uploading]
-    runs-on: 'ubuntu-latest'
-    permissions:
-      id-token: write
-      contents: write
-      pull-requests: write
-    env:
-      model_info: ${{ github.event.inputs.model_id }} (v.${{ github.event.inputs.model_version }})(${{ github.event.inputs.tracing_format }})
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-      - name: Set Up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.x'
-      - name: Install Packages
-        run:
-          python -m pip install mdutils
-      - name: Update Model Upload History
-        run: |
-          model_description="${{ github.event.inputs.model_description }}"
-          python utils/model_uploader/update_models_upload_history_md.py \
-            ${{ github.event.inputs.model_id }} \
-            ${{ github.event.inputs.model_version }} \
-            ${{ github.event.inputs.tracing_format }} \
-            -ed ${{ github.event.inputs.embedding_dimension }} \
-            -pm ${{ github.event.inputs.pooling_mode }} \
-            -id ${{ github.run_id }} -u ${{ github.actor }} \
-            -t "${{ needs.model-uploading.outputs.upload_time }}"
-      - name: Create PR Body
-        id: create_pr_body
-        run: |
-          pr_body="
-          - [ ] This PR made commit to only these three files: MODEL_UPLOAD_HISTORY.md, supported_models.json, and CHANGELOG.md.
-          - [ ] CHANGELOG.md has been updated by the workflow or by you if the workflow fails to do so. 
-          - [ ] Merge conflicts have been resolved.
-          
-          ${{ needs.init-workflow-var.outputs.workflow_info }}
-          ${{ needs.model-auto-tracing.outputs.license_info }}
-          ${{ needs.model-auto-tracing.outputs.model_description_info }}"
-          
-          echo "pr_body<<EOF" >> $GITHUB_OUTPUT
-          echo "${pr_body@E}" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-          echo "${pr_body@E}"
-      - name: Create a Branch & Raise a PR
-        uses: peter-evans/create-pull-request@v7
-        id: create_pr
-        with:
-          committer: github-actions[bot] <github-actions[bot]@users.noreply.github.com>
-          commit-message: 'GitHub Actions Workflow: Update Model Upload History - ${{ env.model_info }}'
-          signoff: true
-          title: 'Update Model Upload History  - ${{ env.model_info }}'
-          body: ${{ steps.create_pr_body.outputs.pr_body }}
-          labels: ModelUploading
-          branch: model-uploader/${{ github.run_id }}
-          delete-branch: true
-          add-paths: |
-            ./utils/model_uploader/upload_history/MODEL_UPLOAD_HISTORY.md
-            ./utils/model_uploader/upload_history/supported_models.json
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-        with:
-          ref: model-uploader/${{ github.run_id }}
-      - name: Create a line for updating CHANGELOG.md
-        id: create_changelog_line
-        continue-on-error: true
-        run: |
-          pr_ref="([#${{ steps.create_pr.outputs.pull-request-number }}](${{ steps.create_pr.outputs.pull-request-url }}))"
-          changelog_line="Update model upload history -  ${{ env.model_info }} by @${{ github.actor }} $pr_ref"
-          echo "changelog_line=$changelog_line" >> $GITHUB_OUTPUT
-      - name: Warning Comment on PR if create_changelog_line fails
-        if: steps.create_changelog_line.outcome == 'failure'
-        uses: thollander/actions-comment-pull-request@v2
-        with:
-          pr_number: ${{ steps.create_pr.outputs.pull-request-number }}
-          message: |
-            Warning:exclamation:: The workflow failed to update CHANGELOG.md. Please update CHANGELOG.md manually. 
-      - name: Update CHANGELOG.md
-        if: steps.create_changelog_line.outcome == 'success'
-        id: update_changelog
-        continue-on-error: true
-        run: |
-          python utils/model_uploader/update_changelog_md.py "${{ steps.create_changelog_line.outputs.changelog_line }}"
-      - name: Commit Updates
-        if: steps.create_changelog_line.outcome == 'success' && steps.update_changelog.outcome == 'success'
-        uses: stefanzweifel/git-auto-commit-action@v4
-        id: commit
-        with:
-          branch: model-uploader/${{ github.run_id }}
-          commit_user_email: "github-actions[bot]@users.noreply.github.com"
-          commit_message: 'GitHub Actions Workflow: Update CHANGELOG.md - ${{ env.model_info }}'
-          commit_options: '--signoff'
-          file_pattern: CHANGELOG.md
-      - name: Warning Comment on PR if update_changelog fails
-        if: steps.create_changelog_line.outcome == 'success' && steps.update_changelog.outcome == 'failure'
-        uses: thollander/actions-comment-pull-request@v2
-        with:
-          pr_number: ${{ steps.create_pr.outputs.pull-request-number }}
-          message: |
-            Warning:exclamation:: The workflow failed to update CHANGELOG.md. Please add the following line manually.
-            >>>
-            ${{ steps.create_changelog_line.outputs.changelog_line }}
-            
-  # Step 8: Trigger Jenkins ml-models workflow
-  trigger-ml-models-release-workflow:
-    needs: [init-workflow-var, history-update]
-    runs-on: 'ubuntu-latest'
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-      - name: Trigger Jenkins Workflow with Generic Webhook
-        run: |
-          jenkins_trigger_token=${{ secrets.JENKINS_ML_MODELS_RELEASE_GENERIC_WEBHOOK_TOKEN }}
-          base_download_path=${{ needs.init-workflow-var.outputs.model_folder }}
-          version=${{ github.event.inputs.model_version }}
-          format=${{ github.event.inputs.tracing_format }}
-          jenkins_params="{\"BASE_DOWNLOAD_PATH\":\"$base_download_path\", \"VERSION\":\"$version\", \"FORMAT\":\"$format\"}"
-          sh utils/model_uploader/trigger_ml_models_release.sh $jenkins_trigger_token "$jenkins_params"
