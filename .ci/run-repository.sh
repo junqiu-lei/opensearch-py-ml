@@ -105,6 +105,12 @@ elif [[ "$TASK_TYPE" == "SentenceTransformerTrace" || "$TASK_TYPE" == "SparseTra
     ${EXTRA_ARGS}
   )
 
+  # Check if the skip deployment flag env var is set
+  if [[ "${SKIP_DEPLOYMENT_TEST}" == "true" ]]; then
+    echo "INFO: Appending --skip-deployment to nox command"
+    nox_command+=( --skip-deployment )
+  fi
+
   echo "nox -s ${nox_command[@]}"
 
   docker run \
