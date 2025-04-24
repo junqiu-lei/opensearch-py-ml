@@ -13,6 +13,8 @@ import argparse
 import os
 import shutil
 import sys
+import json
+import time
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -179,6 +181,7 @@ def register_and_deploy_sentence_transformer_model(
     model_path: str,
     model_config_path: str,
     model_format: str,
+    skip_deployment_test: bool = False,
 ) -> List["DTypeLike"]:
     """
     Register the pretrained sentence transformer model by using the model file and the model config file,
@@ -193,44 +196,70 @@ def register_and_deploy_sentence_transformer_model(
     :type model_config_path: string
     :param model_format: Model format ("TORCH_SCRIPT" or "ONNX")
     :type model_format: string
+    :param skip_deployment_test: If True, skip the registration, deployment, and embedding generation steps.
+    :type skip_deployment_test: bool
     :return: List of embedding data for TEST_SENTENCES
     :rtype: List["DTypeLike"]
     """
     embedding_data = None
+    model_id = None
 
-    # 1.) Register & Deploy the model
-    model_id = register_and_deploy_model(
-        ml_client, model_format, model_path, model_config_path
-    )
-    # 2.) Check model status
-    check_model_status(ml_client, model_id, model_format, DENSE_MODEL_ALGORITHM)
-    # 3.) Generate embeddings
     try:
-        embedding_output = ml_client.generate_embedding(model_id, TEST_SENTENCES)
-        assert len(embedding_output.get("inference_results")) == len(TEST_SENTENCES)
-        embedding_data = [
-            embedding_output["inference_results"][i]["output"][0]["data"]
-            for i in range(len(TEST_SENTENCES))
-        ]
+        if skip_deployment_test:
+            print("--- Skipping deployment test as requested ---")
+            with open(model_config_path, 'r') as f:
+                config_data = json.load(f)
+                model_id = config_data.get("name", "dummy-model-id") + "_" + config_data.get("version", "dummy-version")
+            print(f"--- Placeholder model_id (not registered): {model_id} ---")
+            return []
+        else:
+            print(f"--- Attempting registration and deployment for {model_format} model ---")
+            model_id = register_and_deploy_model(
+                ml_client, model_format, model_path, model_config_path
+            )
+
+        # 2.) Check model status
+        check_model_status(ml_client, model_id, model_format, DENSE_MODEL_ALGORITHM)
+        # 3.) Generate embeddings
+        try:
+            embedding_output = ml_client.generate_embedding(model_id, TEST_SENTENCES)
+            assert len(embedding_output.get("inference_results")) == len(TEST_SENTENCES)
+            embedding_data = [
+                embedding_output["inference_results"][i]["output"][0]["data"]
+                for i in range(len(TEST_SENTENCES))
+            ]
+        except Exception as e:
+            assert (
+                False
+            ), f"Raised Exception in generating sentence embedding with {model_format} model: {e}"
+
+        # 4.) Undeploy the model
+        try:
+            ml_client.undeploy_model(model_id)
+            ml_model_status = ml_client.get_model_info(model_id)
+            assert ml_model_status.get("model_state") == "UNDEPLOYED"
+        except Exception as e:
+            assert False, f"Raised Exception in {model_format} model undeployment: {e}"
+
+        # 5.) Delete the model
+        try:
+            delete_model_obj = ml_client.delete_model(model_id)
+            assert delete_model_obj.get("result") == "deleted"
+        except Exception as e:
+            assert False, f"Raised Exception in deleting {model_format} model: {e}"
+
     except Exception as e:
+        if model_id and not skip_deployment_test:
+             try:
+                 print(f"--- Cleaning up model {model_id} due to error during deployment/testing ---")
+                 ml_client.undeploy_model(model_id, node_ids=[])
+                 time.sleep(2)
+                 ml_client.delete_model(model_id)
+             except Exception as cleanup_e:
+                 print(f"--- Error during cleanup of model {model_id}: {cleanup_e} ---")
         assert (
             False
-        ), f"Raised Exception in generating sentence embedding with {model_format} model: {e}"
-
-    # 4.) Undeploy the model
-    try:
-        ml_client.undeploy_model(model_id)
-        ml_model_status = ml_client.get_model_info(model_id)
-        assert ml_model_status.get("model_state") == "UNDEPLOYED"
-    except Exception as e:
-        assert False, f"Raised Exception in {model_format} model undeployment: {e}"
-
-    # 5.) Delete the model
-    try:
-        delete_model_obj = ml_client.delete_model(model_id)
-        assert delete_model_obj.get("result") == "deleted"
-    except Exception as e:
-        assert False, f"Raised Exception in deleting {model_format} model: {e}"
+        ), f"Raised Exception in {model_format} model registration/deployment: {e}"
 
     # 6.) Return embedding outputs for model verification
     return embedding_data
@@ -283,6 +312,7 @@ def main(
     model_description: Optional[str] = None,
     upload_prefix: Optional[str] = None,
     model_name: Optional[str] = None,
+    skip_deployment: bool = False,
 ) -> None:
     """
     Perform model auto-tracing and prepare files for uploading to OpenSearch model hub
@@ -303,6 +333,8 @@ def main(
     :type upload_prefix: string
     :param model_name: Model customize name for upload
     :type model_name: string
+    :param skip_deployment: Skip the deployment and verification steps within the script.
+    :type skip_deployment: bool
     :return: No return value expected
     :rtype: None
     """
@@ -317,6 +349,7 @@ def main(
     Model Description: {model_description if model_description is not None else 'N/A'}
     Upload Prefix: {upload_prefix if upload_prefix is not None else 'N/A'}
     Model Name: {model_name if model_name is not None else 'N/A'}
+    Skip Deployment: {skip_deployment}
     ==========================================
     """
     )
@@ -335,12 +368,12 @@ def main(
     except Exception as e:
         assert False, f"Raised Exception while deleting {TEMP_MODEL_PATH}: {e}"
 
+    torchscript_embedding_data = None
+    onnx_embedding_data = None
+
     if tracing_format in [TORCH_SCRIPT_FORMAT, BOTH_FORMAT]:
         print("--- Begin tracing a model in TORCH_SCRIPT ---")
-        (
-            torchscript_model_path,
-            torchscript_model_config_path,
-        ) = trace_sentence_transformer_model(
+        torchscript_model_path, torchscript_model_config_path = trace_sentence_transformer_model(
             model_id,
             model_version,
             TORCH_SCRIPT_FORMAT,
@@ -348,12 +381,12 @@ def main(
             pooling_mode,
             model_description,
         )
-
         torchscript_embedding_data = register_and_deploy_sentence_transformer_model(
             ml_client,
             torchscript_model_path,
             torchscript_model_config_path,
             TORCH_SCRIPT_FORMAT,
+            skip_deployment_test=skip_deployment
         )
         pass_test = verify_embedding_data(
             original_embedding_data, torchscript_embedding_data
@@ -380,10 +413,7 @@ def main(
 
     if tracing_format in [ONNX_FORMAT, BOTH_FORMAT]:
         print("--- Begin tracing a model in ONNX ---")
-        (
-            onnx_model_path,
-            onnx_model_config_path,
-        ) = trace_sentence_transformer_model(
+        onnx_model_path, onnx_model_config_path = trace_sentence_transformer_model(
             model_id,
             model_version,
             ONNX_FORMAT,
@@ -391,9 +421,12 @@ def main(
             pooling_mode,
             model_description,
         )
-
         onnx_embedding_data = register_and_deploy_sentence_transformer_model(
-            ml_client, onnx_model_path, onnx_model_config_path, ONNX_FORMAT
+            ml_client,
+            onnx_model_path,
+            onnx_model_config_path,
+            ONNX_FORMAT,
+            skip_deployment_test=skip_deployment
         )
 
         pass_test = verify_embedding_data(original_embedding_data, onnx_embedding_data)
@@ -416,6 +449,16 @@ def main(
 
     store_license_verified_variable(license_verified)
     store_description_variable(config_path_for_checking_description)
+
+    if not skip_deployment:
+        if torchscript_embedding_data is not None:
+            verify_embedding_data(original_embedding_data, torchscript_embedding_data)
+        if onnx_embedding_data is not None:
+            verify_embedding_data(original_embedding_data, onnx_embedding_data)
+    else:
+        print("--- Skipping embedding verification due to skip_deployment flag ---")
+        store_license_verified_variable(True)
+        store_description_variable("Skipped deployment test")
 
     print("\n=== Finished running model_autotracing.py ===")
 
@@ -481,6 +524,11 @@ if __name__ == "__main__":
         const=None,
         help="Model description if you want to overwrite the default description",
     )
+    parser.add_argument(
+        "--skip-deployment",
+        action='store_true',
+        help="Skip the deployment and verification steps within the script."
+    )
     args = parser.parse_args()
     for arg in vars(args):
         value = getattr(args, arg)
@@ -496,4 +544,5 @@ if __name__ == "__main__":
         args.model_description,
         args.upload_prefix,
         args.model_name,
+        args.skip_deployment
     )

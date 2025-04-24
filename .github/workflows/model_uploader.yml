@@ -241,7 +241,6 @@ jobs:
     needs: [init-workflow-var, checking-out-model-hub]
     name: model-auto-tracing
     runs-on: ubuntu-latest
-    continue-on-error: true
     permissions:
       id-token: write
       contents: read
@@ -268,7 +267,7 @@ jobs:
           echo "SPARSE_PRUNE_RATIO=${{ needs.init-workflow-var.outputs.sparse_prune_ratio }}" >> $GITHUB_ENV
           echo "ACTIVATION=${{ needs.init-workflow-var.outputs.activation }}" >> $GITHUB_ENV
       - name: Autotracing ${{ matrix.cluster }} secured=${{ matrix.secured }} version=${{matrix.entry.opensearch_version}}
-        run: "./.ci/run-tests ${{ matrix.cluster }} ${{ matrix.secured }} ${{ matrix.entry.opensearch_version }} ${{github.event.inputs.model_type}}Trace"
+        run: "./.ci/run-tests ${{ matrix.cluster }} ${{ matrix.secured }} ${{ matrix.entry.opensearch_version }} ${{github.event.inputs.model_type}}Trace -- --skip-deployment"
       - name: Limit Model Size to 2GB
         run: |
           upload_size_in_binary_bytes=$(ls -lR ./upload/ | awk '{ SUM += $5} END {print SUM}')
@@ -329,7 +328,6 @@ jobs:
   # Step 6: Download the artifacts & Upload it to the S3 bucket
   model-uploading:
     needs: [init-workflow-var, model-auto-tracing]
-    if: always()
     runs-on: 'ubuntu-latest'
     permissions:
       id-token: write
