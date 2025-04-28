@@ -193,8 +193,6 @@ def semantic_highlighter_trace(session):
         "--timeout",
         "1500",
     )
-    # Download necessary NLTK data using direct import
-    session.run("python", "-c", "import nltk; nltk.download('punkt')", silent=True)
     session.install(".")
 
     session.run(

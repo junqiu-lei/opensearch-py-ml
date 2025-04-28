@@ -24,8 +24,7 @@ from transformers import AutoTokenizer
 
 from opensearch_py_ml.ml_commons import MLCommonClient
 from opensearch_py_ml.ml_models import SemanticHighlighterModel
-# Defer test client import to avoid connection errors when skipping deployment
-# from tests import OPENSEARCH_TEST_CLIENT
+from tests import OPENSEARCH_TEST_CLIENT
 from utils.model_uploader.autotracing_utils import (
     TORCH_SCRIPT_FORMAT,
     autotracing_warning_filters,
@@ -34,6 +33,7 @@ from utils.model_uploader.autotracing_utils import (
     register_and_deploy_model,
     store_description_variable,
     store_license_verified_variable,
+    verify_license_by_hfapi,
 )
 
 
@@ -182,14 +182,22 @@ def main(
     ml_client = None
     if not skip_deployment:
         print("--- Initializing MLCommonClient for deployment test ---")
-        from tests import OPENSEARCH_TEST_CLIENT # Import only when needed
         ml_client = MLCommonClient(OPENSEARCH_TEST_CLIENT)
     else:
         print("--- Skipping MLCommonClient initialization ---")
 
-    # Skip license verification for local models
-    license_verified = True
-    print("--- Skipping license verification for local model ---")
+    # Verify license using Hugging Face API
+    license_verified = False # Default to false
+    try:
+        print(f"--- Verifying license for model {model_id} ---")
+        license_verified = verify_license_by_hfapi(model_id)
+        if license_verified:
+            print("License verified as Apache-2.0.")
+        else:
+            print("License could not be verified as Apache-2.0 by Hugging Face API.")
+    except Exception as e:
+        print(f"Warning: License verification failed: {e}")
+        print("Proceeding with license_verified=False.")
 
     print("--- Begin tracing semantic highlighter model ---")
     test_model = SemanticHighlighterModel(
