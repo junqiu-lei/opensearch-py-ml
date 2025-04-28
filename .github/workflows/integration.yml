@@ -17,7 +17,7 @@ jobs:
         secured: ["true"]
         entry:
           - { opensearch_version: 2.7.0 }
-          - { opensearch_version: 2.11.0 }
+          - { opensearch_version: 3.0.0-beta1 }
 
     steps:
       - name: Checkout
