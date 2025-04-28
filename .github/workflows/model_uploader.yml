@@ -269,6 +269,27 @@ jobs:
           echo "ACTIVATION=${{ needs.init-workflow-var.outputs.activation }}" >> $GITHUB_ENV
       - name: Autotracing ${{ matrix.cluster }} secured=${{ matrix.secured }} version=${{matrix.entry.opensearch_version}}
         run: "./.ci/run-tests ${{ matrix.cluster }} ${{ matrix.secured }} ${{ matrix.entry.opensearch_version }} ${{github.event.inputs.model_type}}Trace"
+        shell: bash
+
+      - name: Debug - List current directory
+        if: always() # Run even if previous step failed
+        run: ls -la
+        shell: bash
+
+      - name: Debug - Check upload directory
+        if: always() # Run even if previous step failed
+        run: |
+          echo "Checking for ./upload/ directory..."
+          ls -la ./upload/ || echo "./upload/ directory not found or empty."
+        shell: bash
+
+      - name: Debug - Check trace_output directory
+        if: always() # Run even if previous step failed
+        run: |
+          echo "Checking for ./trace_output/ directory..."
+          ls -la ./trace_output/ || echo "./trace_output/ directory not found or empty."
+        shell: bash
+
       - name: Limit Model Size to 2GB
         run: |
           upload_size_in_binary_bytes=$(ls -lR ./upload/ | awk '{ SUM += $5} END {print SUM}')
