@@ -183,3 +183,20 @@ def sparsetrace(session):
         "utils/model_uploader/sparse_model_autotracing.py",
         *(session.posargs),
     )
+
+
+@nox.session(python=["3.9"])
+def semantic_highlighter_trace(session):
+    session.install(
+        "-r",
+        "requirements-dev.txt",
+        "--timeout",
+        "1500",
+    )
+    session.install(".")
+
+    session.run(
+        "python",
+        "utils/model_uploader/semantic_highlighter_autotracing.py",
+        *(session.posargs),
+    )
