@@ -24,7 +24,8 @@ from transformers import AutoTokenizer
 
 from opensearch_py_ml.ml_commons import MLCommonClient
 from opensearch_py_ml.ml_models import SemanticHighlighterModel
-from tests import OPENSEARCH_TEST_CLIENT
+# Defer test client import to avoid connection errors when skipping deployment
+# from tests import OPENSEARCH_TEST_CLIENT
 from utils.model_uploader.autotracing_utils import (
     TORCH_SCRIPT_FORMAT,
     autotracing_warning_filters,
@@ -181,7 +182,8 @@ def main(
     ml_client = None
     if not skip_deployment:
         print("--- Initializing MLCommonClient for deployment test ---")
-        ml_client = MLCommonClient(OPENSEARCH_TEST_CLIENT())
+        from tests import OPENSEARCH_TEST_CLIENT # Import only when needed
+        ml_client = MLCommonClient(OPENSEARCH_TEST_CLIENT)
     else:
         print("--- Skipping MLCommonClient initialization ---")
 

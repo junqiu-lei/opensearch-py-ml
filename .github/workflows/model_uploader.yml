@@ -249,7 +249,7 @@ jobs:
     strategy:
       matrix:
         cluster: ["opensearch"]
-        secured: ["true"]
+        secured: ["false"]
         entry:
           - { opensearch_version: 3.0.0-beta1 }
     steps:
