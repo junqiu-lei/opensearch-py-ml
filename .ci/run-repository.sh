@@ -124,8 +124,15 @@ elif [[ "$TASK_TYPE" == "SentenceTransformerTrace" || "$TASK_TYPE" == "SparseTra
 
   # To upload a model, we need the model artifact, description, license files into local path
   # trace_output should include description and license file.
+  echo "Attempting to copy files from container opensearch-py-ml-trace-runner..."
   docker cp opensearch-py-ml-trace-runner:/code/opensearch-py-ml/upload/ ./upload/
   docker cp opensearch-py-ml-trace-runner:/code/opensearch-py-ml/trace_output/ ./trace_output/
+  
+  echo "Verifying copied files on runner..."
+  ls -la ./upload/ || echo "Verification failed: ./upload/ not found after docker cp."
+  ls -la ./trace_output/ || echo "Verification failed: ./trace_output/ not found after docker cp."
+  
   # Delete the docker image
+  echo "Attempting to remove container opensearch-py-ml-trace-runner..."
   docker rm opensearch-py-ml-trace-runner
 fi
