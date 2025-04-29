@@ -97,7 +97,7 @@ END
     docker run \
       --name "$node_name" \
       --network "$network_name" \
-      --env "ES_JAVA_OPTS=-Xms4g -Xmx4g" \
+      --env "OPENSEARCH_JAVA_OPTS=-Xms4g -Xmx4g" \
       "${environment[@]}" \
       "${volumes[@]}" \
       "${security[@]}" \
