@@ -392,7 +392,7 @@ jobs:
       
   # Step 6: Download the artifacts & Upload it to the S3 bucket
   model-uploading:
-    needs: [init-workflow-var, manual-approval]
+    needs: [init-workflow-var]
     runs-on: 'ubuntu-latest'
     permissions:
       id-token: write
