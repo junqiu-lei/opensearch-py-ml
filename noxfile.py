@@ -193,6 +193,11 @@ def semantic_highlighter_trace(session):
         "--timeout",
         "1500",
     )
+    # Download necessary NLTK data
+    session.log("Downloading NLTK data (punkt, wordnet, omw-1.4)...")
+    session.run("python", "-c", "import nltk; nltk.download('punkt'); nltk.download('wordnet'); nltk.download('omw-1.4')", silent=True)
+    session.log("NLTK data download complete.")
+    
     session.install(".")
 
     session.run(
