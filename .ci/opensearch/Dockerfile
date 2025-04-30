@@ -15,4 +15,18 @@ RUN if [ "$OPENSEARCH_VERSION" == "2.11.0" -o "$OPENSEARCH_VERSION" == "3.0.0-be
     echo "plugins.ml_commons.allow_registering_model_via_local_file: true" >> $opensearch_yml; \
     echo "plugins.ml_commons.allow_registering_model_via_url: true" >> $opensearch_yml; \
 fi
+
+# Security configuration for OpenSearch 3.0.0
+RUN if [ "$OPENSEARCH_VERSION" == "3.0.0-beta1" ] ; then \
+    echo "plugins.security.allow_default_init_securityindex: true" >> $opensearch_yml; \
+    echo "plugins.security.authcz.admin_dn:" >> $opensearch_yml; \
+    echo "  - CN=A,OU=UNIT,O=ORG,L=TORONTO,ST=ONTARIO,C=CA" >> $opensearch_yml; \
+    echo "plugins.security.nodes_dn:" >> $opensearch_yml; \
+    echo "  - CN=N,OU=UNIT,O=ORG,L=TORONTO,ST=ONTARIO,C=CA" >> $opensearch_yml; \
+    echo "plugins.security.audit.type: internal_opensearch" >> $opensearch_yml; \
+    echo "plugins.security.enable_snapshot_restore_privilege: true" >> $opensearch_yml; \
+    echo "plugins.security.check_snapshot_restore_write_privileges: true" >> $opensearch_yml; \
+    echo "plugins.security.restapi.roles_enabled: [\"all_access\", \"security_rest_api_access\"]" >> $opensearch_yml; \
+fi
+
 RUN if [ "$SECURE_INTEGRATION" != "true" ] ; then echo "plugins.security.disabled: true" >> $opensearch_yml; fi

@@ -117,7 +117,5 @@ END
   if wait_for_container "$opensearch_node_name" "$network_name"; then
     export node_url=$node_url
     echo -e "\033[32;1mSUCCESS:\033[0m Running on: $node_url\033[0m"
-
   fi
-
 done
