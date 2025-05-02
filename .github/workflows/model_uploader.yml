@@ -327,49 +327,10 @@ jobs:
       license_info: ${{ steps.license_verification.outputs.license_info }}
       model_description_info: ${{ steps.model_description_info.outputs.model_description_info }}
       dryrun_output: ${{ steps.dryrun_model_uploading.outputs.dryrun_output }}
-
-  # Step 5: Ask for manual approval from the CODEOWNERS
-  manual-approval:
-    needs: [init-workflow-var, model-auto-tracing]
-    runs-on: 'ubuntu-latest'
-    permissions:
-      issues: write
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-      - name: Get Approvers
-        id: get_approvers
-        run: |
-          echo "approvers=$(cat .github/CODEOWNERS | grep @ | tr -d '* ' | sed 's/@/,/g' | sed 's/,//1')" >> $GITHUB_OUTPUT
-      - name: Create Issue Body
-        id: create_issue_body
-        run: |    
-          issue_body="Please approve or deny opensearch-py-ml model uploading:
-          
-          ${{ needs.model-auto-tracing.outputs.license_line }}
-          
-          ${{ needs.init-workflow-var.outputs.workflow_info }}
-          ${{ needs.model-auto-tracing.outputs.model_description_info }}
-          
-          ===== Dry Run of Model Uploading =====
-          ${{ needs.model-auto-tracing.outputs.dryrun_output }}"
-
-          echo "issue_body<<EOF" >> $GITHUB_OUTPUT
-          echo "${issue_body@E}" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-          echo "${issue_body@E}"
-      - uses: trstringer/manual-approval@v1
-        with:
-          secret: ${{ github.TOKEN }}
-          approvers: ${{ steps.get_approvers.outputs.approvers }}
-          minimum-approvals: 2
-          issue-title: "Upload Model to OpenSearch Model Hub (${{ github.event.inputs.model_id }})"
-          issue-body: ${{ steps.create_issue_body.outputs.issue_body }}
-          exclude-workflow-initiator-as-approver: false
       
   # Step 6: Download the artifacts & Upload it to the S3 bucket
   model-uploading:
-    needs: [init-workflow-var, manual-approval]
+    needs: [init-workflow-var, model-auto-tracing]
     runs-on: 'ubuntu-latest'
     permissions:
       id-token: write
