@@ -275,36 +275,62 @@ def prepare_files_for_uploading(
     (path to model config json file) in the UPLOAD_FOLDER_PATH
     :rtype: Tuple[str, str]
     """
+    print(f"\n[DEBUG] Starting prepare_files_for_uploading with:")
+    print(f"[DEBUG] model_id: {model_id}")
+    print(f"[DEBUG] model_version: {model_version}")
+    print(f"[DEBUG] model_format: {model_format}")
+    print(f"[DEBUG] upload_prefix: {upload_prefix}")
+    print(f"[DEBUG] model_name: {model_name}")
+
     if upload_prefix is not None:
         model_type = upload_prefix
     else:
         model_type = model_id.split("/")[0]
+    print(f"[DEBUG] model_type determined as: {model_type}")
+
     if model_name is None:
         model_name = model_id.split("/")[-1]
+    print(f"[DEBUG] model_name determined as: {model_name}")
+
     model_format = model_format.lower()
+    print(f"[DEBUG] model_format converted to lowercase: {model_format}")
+
     folder_to_delete = (
         TORCHSCRIPT_FOLDER_PATH if model_format == "torch_script" else ONNX_FOLDER_PATH
     )
+    print(f"[DEBUG] folder_to_delete set to: {folder_to_delete}")
 
     # Store to be uploaded files in UPLOAD_FOLDER_PATH
     try:
         dst_model_dir = (
             f"{UPLOAD_FOLDER_PATH}{model_name}/{model_version}/{model_format}"
         )
+        print(f"[DEBUG] dst_model_dir constructed as: {dst_model_dir}")
+        
         os.makedirs(dst_model_dir, exist_ok=True)
+        
         dst_model_filename = (
             f"{model_type}_{model_name}-{model_version}-{model_format}.zip"
         )
+        print(f"[DEBUG] dst_model_filename constructed as: {dst_model_filename}")
+        
         dst_model_path = dst_model_dir + "/" + dst_model_filename
+        print(f"[DEBUG] Final dst_model_path: {dst_model_path}")
+        
         shutil.copy(src_model_path, dst_model_path)
         print(f"\nCopied {src_model_path} to {dst_model_path}")
 
         dst_model_config_dir = (
             f"{UPLOAD_FOLDER_PATH}{model_name}/{model_version}/{model_format}"
         )
+        print(f"[DEBUG] dst_model_config_dir constructed as: {dst_model_config_dir}")
+        
         os.makedirs(dst_model_config_dir, exist_ok=True)
+        
         dst_model_config_filename = "config.json"
         dst_model_config_path = dst_model_config_dir + "/" + dst_model_config_filename
+        print(f"[DEBUG] Final dst_model_config_path: {dst_model_config_path}")
+        
         shutil.copy(src_model_config_path, dst_model_config_path)
         print(f"Copied {src_model_config_path} to {dst_model_config_path}")
     except Exception as e:
