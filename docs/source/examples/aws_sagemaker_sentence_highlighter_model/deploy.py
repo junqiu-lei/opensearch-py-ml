@@ -13,6 +13,27 @@ from sagemaker.pytorch import PyTorchModel
 from sagemaker.serializers import JSONSerializer
 from sagemaker.deserializers import JSONDeserializer
 
+"""
+AWS SageMaker Deployment Script for Semantic Highlighter Model
+
+Usage:
+    1. For local model deployment (recommended for development):
+       export LOCAL_MODEL_PATH="/absolute/path/to/your/model.zip"
+       python deploy.py
+
+    2. For remote model deployment (uses OpenSearch pre-trained model):
+       python deploy.py
+
+Environment Variables:
+    - LOCAL_MODEL_PATH: Absolute path to local model zip file (optional)
+    - INSTANCE_TYPE: SageMaker instance type (default: ml.m5.xlarge)
+
+Example:
+    export LOCAL_MODEL_PATH="/Users/junqiu/dev/final-model/opensearch-py-ml/semantic-highlighter/opensearch-semantic-highlighter-v1.zip"
+    export INSTANCE_TYPE="ml.g4dn.xlarge"  # For GPU deployment
+    python deploy.py
+"""
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -22,11 +43,73 @@ logger = logging.getLogger(__name__)
 
 # Get configuration from environment variables
 INSTANCE_TYPE = os.getenv('INSTANCE_TYPE', 'ml.m5.xlarge')
+LOCAL_MODEL_PATH = os.getenv('LOCAL_MODEL_PATH')  # Path to local model zip file
 
 def get_endpoint_name():
     """Generate a unique endpoint name with timestamp"""
     timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
     return f"semantic-highlighter-{timestamp}"
+
+def validate_and_show_config():
+    """Validate configuration and show current settings"""
+    logger.info("=" * 60)
+    logger.info("SAGEMAKER DEPLOYMENT CONFIGURATION")
+    logger.info("=" * 60)
+    logger.info(f"Instance Type: {INSTANCE_TYPE}")
+    
+    if LOCAL_MODEL_PATH:
+        logger.info(f"Model Source: Local file")
+        logger.info(f"Local Model Path: {LOCAL_MODEL_PATH}")
+        
+        # Validate local model path
+        if not os.path.exists(LOCAL_MODEL_PATH):
+            logger.error(f"Local model file not found: {LOCAL_MODEL_PATH}")
+            logger.error("Please check the path and ensure the file exists.")
+            raise FileNotFoundError(f"Local model file not found: {LOCAL_MODEL_PATH}")
+        
+        if not LOCAL_MODEL_PATH.endswith('.zip'):
+            logger.warning(f"Local model path doesn't end with .zip: {LOCAL_MODEL_PATH}")
+            logger.warning("Make sure this is a valid zip file.")
+        
+        file_size = os.path.getsize(LOCAL_MODEL_PATH) / (1024 * 1024)  # MB
+        logger.info(f"Model file size: {file_size:.2f} MB")
+    else:
+        logger.info(f"Model Source: Remote (OpenSearch pre-trained model hub)")
+        logger.info("To use a local model, set LOCAL_MODEL_PATH environment variable")
+    
+    logger.info("=" * 60)
+
+def extract_local_model(zip_path, extract_dir):
+    """Extract local model zip file"""
+    try:
+        logger.info(f"Using local model zip: {zip_path}")
+        
+        if not os.path.exists(zip_path):
+            raise FileNotFoundError(f"Local model zip file not found: {zip_path}")
+        
+        # Extract zip file
+        logger.info(f"Extracting local zip file to {extract_dir}")
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(extract_dir)
+        
+        # Find the .pt file in the extracted contents
+        pt_files = []
+        for root, _, files in os.walk(extract_dir):
+            for file in files:
+                if file.endswith('.pt'):
+                    pt_files.append(os.path.join(root, file))
+        
+        if not pt_files:
+            raise FileNotFoundError("No .pt file found in the extracted contents")
+        
+        model_path = pt_files[0]  # Use the first .pt file found
+        logger.info(f"Found model file at: {model_path}")
+        
+        return model_path
+        
+    except Exception as e:
+        logger.error(f"Error extracting local model: {str(e)}")
+        raise
 
 def download_and_extract_model(url, extract_dir):
     """Download zip file and extract model"""
@@ -84,11 +167,16 @@ def prepare_model_package():
             shutil.rmtree(model_dir)
         os.makedirs(model_dir)
 
-        # model from OpenSearch pre-trained model hub
-        model_url = "https://artifacts.opensearch.org/models/ml-models/amazon/sentence-highlighting/opensearch-semantic-highlighter-v1/1.0.0/torch_script/sentence-highlighting_opensearch-semantic-highlighter-v1-1.0.0-torch_script.zip"
+        # Determine model source: local file or remote URL
+        if LOCAL_MODEL_PATH:
+            logger.info("Using local model zip file")
+            model_path = extract_local_model(LOCAL_MODEL_PATH, model_dir)
+        else:
+            logger.info("Using remote model from OpenSearch hub")
+            # model from OpenSearch pre-trained model hub
+            model_url = "https://artifacts.opensearch.org/models/ml-models/amazon/sentence-highlighting/opensearch-semantic-highlighter-v1/1.0.0/torch_script/sentence-highlighting_opensearch-semantic-highlighter-v1-1.0.0-torch_script.zip"
+            model_path = download_and_extract_model(model_url, model_dir)
         
-        # Download and extract model
-        model_path = download_and_extract_model(model_url, model_dir)
         model_filename = os.path.basename(model_path)
         
         # Create code directory for inference script
@@ -211,6 +299,9 @@ def test_endpoint(endpoint_name):
 
 def deploy_model():
     try:
+        # Validate configuration and show settings
+        validate_and_show_config()
+        
         # Prepare model package first
         prepare_model_package()
         
