@@ -48,11 +48,24 @@ def model_fn(model_dir):
             device = torch.device("cpu")
             logger.info("Using CPU for inference")
 
-        # Load model file
-        model_path = os.path.join(model_dir, "opensearch-semantic-highlighter-v1.pt")
-        logger.info(f"Loading model from: {model_path}")
-        if not os.path.exists(model_path):
-            raise FileNotFoundError(f"Model file not found at {model_path}")
+        # Find .pt file in model directory
+        pt_files = []
+        for file in os.listdir(model_dir):
+            if file.endswith('.pt'):
+                pt_files.append(os.path.join(model_dir, file))
+        
+        if not pt_files:
+            logger.error(f"No .pt files found in {model_dir}")
+            logger.error(f"Directory contents: {os.listdir(model_dir)}")
+            raise FileNotFoundError(f"No .pt file found in model directory: {model_dir}")
+        
+        if len(pt_files) > 1:
+            logger.warning(f"Multiple .pt files found: {[os.path.basename(f) for f in pt_files]}")
+            logger.warning("Using the first one found")
+        
+        model_path = pt_files[0]
+        logger.info(f"Found and loading model from: {model_path}")
+        logger.info(f"Model filename: {os.path.basename(model_path)}")
 
         # Load the model with explicit device mapping
         model = torch.jit.load(model_path, map_location=device)
