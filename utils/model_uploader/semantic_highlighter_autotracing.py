@@ -215,261 +215,130 @@ def generate_tracing_dataset(size=10):
 
 def main(
     model_id: str,
-    model_version: str,
-    tracing_format: str,
-    model_description: Optional[str] = None,
-    upload_prefix: Optional[str] = None,
-    model_name: Optional[str] = None,
-    skip_deployment: bool = False,
-    device: Optional[str] = None,
-) -> None:
+    version: str,
+    model_format: str,
+    upload: bool = False,
+    model_name: str = None,
+    model_description: str = "",
+):
     """
-    Perform model auto-tracing and prepare files for uploading to OpenSearch model hub.
-
-    This function handles the complete workflow for preparing a semantic highlighter model:
-    1. Verify the model license (Apache-2.0)
-    2. Generate example inputs for tracing
-    3. Trace the model to TorchScript format
-    4. Create configuration files
-    5. Optionally test deployment in a local OpenSearch instance
-    6. Prepare files for uploading to the model repository
+    Main function to trace and optionally upload the semantic highlighter model.
 
     Parameters
     ----------
     model_id : str
-        Model ID of the pretrained Hugging Face model to trace
-    model_version : str
-        Version number to assign to the traced model for registration
-    tracing_format : str
-        Model format for tracing (only "TORCH_SCRIPT" is supported for semantic highlighter)
-    model_description : str, optional
-        Custom description for the model in the config file
-    upload_prefix : str, optional
-        Path prefix for the uploaded model files
+        Model ID to use from Hugging Face
+    version : str
+        Version of the model
+    model_format : str
+        Format to save the model in (TORCH_SCRIPT or ONNX)
+    upload : bool, optional
+        Whether to upload the model to OpenSearch
     model_name : str, optional
-        Custom name for the model in the config file and when registered
-    skip_deployment : bool, optional
-        Whether to skip testing deployment in a local OpenSearch instance
+        Name for the traced model file
+    model_description : str, optional
+        Description of the model
     """
-    print(
-        f"""
-    === Begin running semantic_highlighter_autotracing.py ===
-    Model ID: {model_id}
-    Model Version: {model_version}
-    Tracing Format: {tracing_format}
-    Model Description: {model_description if model_description is not None else 'N/A'}
-    Upload Prefix: {upload_prefix if upload_prefix is not None else 'N/A'}
-    Model Name: {model_name if model_name is not None else 'N/A'}
-    Skip Deployment: {skip_deployment}
-    Device Selection: Auto (prefer GPU if available)
-    ==========================================
-    """
-    )
+    # Initialize model and tokenizer
+    base_model_id = "bert-base-uncased"
+    tokenizer = AutoTokenizer.from_pretrained(base_model_id)
+    model = SemanticHighlighterModel(base_model_id)
 
-    # Semantic highlighter only supports TorchScript
-    assert (
-        tracing_format == TORCH_SCRIPT_FORMAT
-    ), f"Semantic highlighter only supports {TORCH_SCRIPT_FORMAT}"
-
-    # Initialize ML Commons client for testing if deployment is not skipped
-    ml_client = None
-    if not skip_deployment:
-        print("--- Initializing MLCommonClient for deployment test ---")
-        ml_client = MLCommonClient(OPENSEARCH_TEST_CLIENT)
-    else:
-        print("--- Skipping MLCommonClient initialization ---")
-
-    # Verify license using Hugging Face API
-    license_verified = False  # Default to false
-    try:
-        print(f"--- Verifying license for model {model_id} ---")
-        license_verified = verify_license_by_hfapi(model_id)
-        if license_verified:
-            print("License verified as Apache-2.0.")
-        else:
-            print("License could not be verified as Apache-2.0 by Hugging Face API.")
-    except Exception as e:
-        print(f"Warning: License verification failed: {e}")
-        print("Proceeding with license_verified=False.")
-
-    # Initialize the semantic highlighter model
-    print("--- Begin tracing semantic highlighter model ---")
-    test_model = SemanticHighlighterModel(
-        model_id=model_id, folder_path="semantic-highlighter/", overwrite=True
-    )
-
-    # Generate example inputs for tracing by creating a sample dataset
+    # Generate tracing dataset
     trace_dataset = generate_tracing_dataset()
-    example_inputs = {
-        "input_ids": torch.tensor(trace_dataset[0]["input_ids"]).unsqueeze(
-            0
-        ),  # Add batch dimension
-        "attention_mask": torch.tensor(trace_dataset[0]["attention_mask"]).unsqueeze(0),
-        "token_type_ids": torch.tensor(trace_dataset[0]["token_type_ids"]).unsqueeze(0),
-        "sentence_ids": torch.tensor(trace_dataset[0]["sentence_ids"]).unsqueeze(0),
-    }
 
-    # Log the shapes of input tensors
-    print("Input shapes:")
-    for k, v in example_inputs.items():
-        print(f"{k}: {v.shape}")
-
-    # Trace and save the model to TorchScript format
-    torchscript_model_path = test_model.save_as_pt(
-        example_inputs=example_inputs,
-        model_id=model_id,
-        model_name=None,  # Use default
-        add_apache_license=True,
+    # Create DataLoader for batch processing
+    dataloader = DataLoader(
+        trace_dataset,
+        batch_size=1,  # Use batch size 1 for tracing
+        shuffle=False,
+        collate_fn=lambda x: {
+            k: torch.stack([torch.tensor(d[k]) for d in x])
+            for k in x[0].keys()
+        },
     )
 
-    # Create model configuration file for OpenSearch ML Commons
-    torchscript_model_config_path = test_model.make_model_config_json(
-        model_name=model_name,
-        version_number=model_version,
-        model_format=TORCH_SCRIPT_FORMAT,
-        description=model_description,
+    # Get a batch of inputs
+    batch = next(iter(dataloader))
+
+    # Generate default model name if not provided
+    if model_name is None:
+        model_name = str(model_id.split("/")[-1] + ".pt")
+
+    # Create output directories
+    model_dir = os.path.join(model.folder_path, "model")
+    os.makedirs(model_dir, exist_ok=True)
+
+    # Trace and save the model
+    torchscript_model_path = model.save_as_pt(
+        example_inputs=batch,
+        model_dir=model_dir,
+        model_filename=model_name,
     )
 
-    # Show the generated configuration
-    preview_model_config(TORCH_SCRIPT_FORMAT, torchscript_model_config_path)
+    # Save tokenizer files
+    tokenizer_path = os.path.join(model.folder_path, "tokenizer")
+    os.makedirs(tokenizer_path, exist_ok=True)
+    tokenizer.save_pretrained(tokenizer_path)
+    print(f"Tokenizer files saved to {tokenizer_path}")
 
-    # Test model deployment and inference if not skipped
-    if not skip_deployment:
-        print("--- Testing model deployment ---")
-        model_id = register_and_deploy_model(
-            ml_client,
-            TORCH_SCRIPT_FORMAT,
-            torchscript_model_path,
-            torchscript_model_config_path,
+    # Create zip file with model and tokenizer
+    zip_file_name = str(model_id.split("/")[-1] + ".zip")
+    zip_file_path = os.path.join(model.folder_path, zip_file_name)
+    with ZipFile(str(zip_file_path), "w") as zipObj:
+        model_path = os.path.join(model_dir, model_name)
+        zipObj.write(model_path, arcname=str(model_name))
+
+        for file in os.listdir(tokenizer_path):
+            file_path = os.path.join(tokenizer_path, file)
+            zipObj.write(file_path, arcname=file)
+
+    # Add Apache license if needed
+    model._add_apache_license_to_model_zip_file(zip_file_path)
+
+    model.torch_script_zip_file_path = zip_file_path
+    print(f"Zip file saved to {zip_file_path}")
+
+    if upload:
+        # Initialize MLCommonClient for deployment
+        print("--- Initializing MLCommonClient for deployment test ---")
+        ml_client = MLCommonClient()
+
+        # Verify license
+        print(f"--- Verifying license for model {model_id} ---")
+        license = ml_client.verify_model_license(model_id)
+        print(f"License verified as {license}.")
+
+        # Upload model
+        print("--- Uploading model to OpenSearch ---")
+        ml_client.upload_model(
+            model_id=model_id,
+            version=version,
+            model_format=model_format,
+            model_path=zip_file_path,
+            model_name=model_name,
+            model_description=model_description,
         )
+        print("Model uploaded successfully.")
 
-        # Verify model is deployed and ready
-        check_model_status(
-            ml_client,
-            model_id,
-            TORCH_SCRIPT_FORMAT,
-            QUESTION_ANSWERING_ALGORITHM,
-        )
-
-        try:
-            # Test inference with a sample question and context
-            question = "What are the main side effects of aspirin and when should it not be used?"
-            context = "Aspirin is a commonly used medication for pain relief and fever reduction. While effective, patients may experience stomach upset and bleeding as common side effects. In rare cases, some people may develop allergic reactions. Aspirin should not be given to children under 12 due to the risk of Reye's syndrome. Additionally, people with bleeding disorders, stomach ulcers, or those about to undergo surgery should avoid aspirin. Some patients taking blood thinners must also consult their doctor before using aspirin, as it can increase bleeding risk. For minor aches and fever, the typical adult dose is 325-650 mg every 4-6 hours."
-
-            # Run inference using the deployed model
-            output = ml_client.generate_question_answering(model_id, question, context)
-
-            # Verify output format and contents
-            assert output is not None, "No output received from model"
-            assert (
-                "inference_results" in output
-            ), "Missing inference_results in response"
-            assert len(output["inference_results"]) > 0, "No inference results found"
-
-            # Log the output for verification
-            print("\n=== Model Inference Output ===")
-            print(json.dumps(output, indent=2))
-            print("Successfully verified model inference output")
-
-        except Exception as e:
-            print(f"Warning: Question answering failed: {e}")
-
-        # Clean up deployed resources
-        print("--- Undeploying and cleaning up test model ---")
-        if model_id:
-            try:
-                ml_client.undeploy_model(model_id)
-                ml_client.delete_model(model_id)
-            except Exception as e:
-                print(f"Warning: Cleanup failed: {e}")
-
-    # Prepare files for the OpenSearch Model Hub upload
-    torchscript_dst_model_path, torchscript_dst_model_config_path = (
-        prepare_files_for_uploading(
-            model_id,
-            model_version,
-            TORCH_SCRIPT_FORMAT,
-            torchscript_model_path,
-            torchscript_model_config_path,
-            upload_prefix,
-            model_name,
-        )
-    )
-
-    # Store verification results in environment variables for CI/CD
-    store_license_verified_variable(license_verified)
-    store_description_variable(torchscript_dst_model_config_path)
-
-    print("\n=== Finished running semantic_highlighter_autotracing.py ===")
+    return zip_file_path
 
 
 if __name__ == "__main__":
-    # Configure warning filters to suppress unnecessary warnings during tracing
-    autotracing_warning_filters()
-
-    # Set up command-line argument parser
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "model_id",
-        type=str,
-        help="Model ID for auto-tracing and uploading",
-    )
-    parser.add_argument(
-        "model_version",
-        type=str,
-        help="Model version number (e.g. 1.0.1)",
-    )
-    parser.add_argument(
-        "tracing_format",
-        choices=["TORCH_SCRIPT"],
-        help="Model format for auto-tracing (only TORCH_SCRIPT supported)",
-    )
-    parser.add_argument(
-        "-up",
-        "--upload_prefix",
-        type=str,
-        nargs="?",
-        default=None,
-        help="Model customize path prefix for upload",
-    )
-    parser.add_argument(
-        "-mn",
-        "--model_name",
-        type=str,
-        nargs="?",
-        default=None,
-        help="Model customize name for upload",
-    )
-    parser.add_argument(
-        "-md",
-        "--model_description",
-        type=str,
-        nargs="?",
-        default=None,
-        const=None,
-        help="Model description if you want to overwrite the default description",
-    )
-    parser.add_argument(
-        "--skip-deployment",
-        action="store_true",
-        help="Skip the deployment and verification steps within the script.",
-    )
-
-    # Parse arguments and handle empty string values
+    parser = argparse.ArgumentParser(description="Trace semantic highlighter model")
+    parser.add_argument("model_id", type=str, help="Model ID to use from Hugging Face")
+    parser.add_argument("version", type=str, help="Version of the model")
+    parser.add_argument("model_format", type=str, help="Format to save the model in (TORCH_SCRIPT or ONNX)")
+    parser.add_argument("-up", "--upload", action="store_true", help="Whether to upload the model to OpenSearch")
+    parser.add_argument("-mn", "--model_name", type=str, help="Name for the traced model file")
+    parser.add_argument("-md", "--model_description", type=str, default="", help="Description of the model")
     args = parser.parse_args()
-    for arg in vars(args):
-        value = getattr(args, arg)
-        if isinstance(value, str) and value.strip() == "":
-            setattr(args, arg, None)
 
-    # Run the main function with parsed arguments
     main(
-        args.model_id,
-        args.model_version,
-        args.tracing_format,
-        args.model_description,
-        args.upload_prefix,
-        args.model_name,
-        args.skip_deployment,
-        None,  # Always use auto device selection
+        model_id=args.model_id,
+        version=args.version,
+        model_format=args.model_format,
+        upload=args.upload,
+        model_name=args.model_name,
+        model_description=args.model_description,
     )
