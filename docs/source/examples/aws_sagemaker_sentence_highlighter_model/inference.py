@@ -29,196 +29,177 @@ def ensure_nltk_data():
 ensure_nltk_data()
 
 def model_fn(model_dir):
-    """Load the model for inference"""
-    try:
-        # Log environment information
-        logger.info("Environment Information:")
-        logger.info(f"PyTorch Version: {torch.__version__}")
-        logger.info(f"CUDA Available: {torch.cuda.is_available()}")
-        if torch.cuda.is_available():
-            logger.info(f"CUDA Version: {torch.version.cuda}")
-            logger.info(f"Current CUDA Device: {torch.cuda.current_device()}")
-            logger.info(f"CUDA Device Name: {torch.cuda.get_device_name()}")
-
-        # Determine device for model loading
-        if torch.cuda.is_available():
-            device = torch.device("cuda")
-            logger.info("Using GPU for inference")
-        else:
-            device = torch.device("cpu")
-            logger.info("Using CPU for inference")
-
-        # Find .pt file in model directory
-        pt_files = []
-        for file in os.listdir(model_dir):
-            if file.endswith('.pt'):
-                pt_files.append(os.path.join(model_dir, file))
+    """
+    Load the model for inference.
+    
+    Parameters
+    ----------
+    model_dir : str
+        Directory containing the model files
         
-        if not pt_files:
-            logger.error(f"No .pt files found in {model_dir}")
-            logger.error(f"Directory contents: {os.listdir(model_dir)}")
-            raise FileNotFoundError(f"No .pt file found in model directory: {model_dir}")
-        
-        if len(pt_files) > 1:
-            logger.warning(f"Multiple .pt files found: {[os.path.basename(f) for f in pt_files]}")
-            logger.warning("Using the first one found")
-        
-        model_path = pt_files[0]
-        logger.info(f"Found and loading model from: {model_path}")
-        logger.info(f"Model filename: {os.path.basename(model_path)}")
-
-        # Load the model with explicit device mapping
-        model = torch.jit.load(model_path, map_location=device)
-        logger.info("Model loaded successfully")
-        model.eval()
-        
-        return model
-        
-    except Exception as e:
-        logger.error(f"Error loading model: {str(e)}")
-        raise
+    Returns
+    -------
+    torch.jit.ScriptModule
+        The loaded model
+    """
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = torch.jit.load(os.path.join(model_dir, "model.pt"), map_location=device)
+    model.eval()
+    return model
 
 def input_fn(request_body, request_content_type):
     """
-    Deserialize and prepare the prediction input
+    Deserialize and prepare the prediction input.
     
-    Expected input format (JSON):
-    {
-        "question": "What is the main topic discussed?",
-        "context": "This is a long text document containing multiple sentences. The model will identify which sentences are most relevant to answering the question."
-    }
-    
-    Args:
-        request_body: The request body as bytes
-        request_content_type: Content type of the request (should be 'application/json')
-    
-    Returns:
-        dict: Parsed input data containing 'question' and 'context' fields
-    
-    Raises:
-        ValueError: If content type is not supported or required fields are missing
+    Parameters
+    ----------
+    request_body : bytes
+        The request body containing the input data
+    request_content_type : str
+        The content type of the request
+        
+    Returns
+    -------
+    dict
+        Dictionary containing the processed input tensors
+        
+    Raises
+    ------
+    ValueError
+        If the input format is invalid or required fields are missing
     """
-    try:
-        if request_content_type == 'application/json':
-            input_data = json.loads(request_body)
+    if request_content_type == "application/json":
+        input_data = json.loads(request_body)
+        
+        # Handle both single and batch inputs
+        if "inputs" in input_data:
+            # Batch input format
+            if not isinstance(input_data["inputs"], list):
+                raise ValueError("'inputs' must be a list of question-context pairs")
             
-            # Validate required fields
-            if 'question' not in input_data:
-                raise ValueError("Missing required field: 'question'")
-            if 'context' not in input_data:
-                raise ValueError("Missing required field: 'context'")
+            # Validate each input in the batch
+            for i, item in enumerate(input_data["inputs"]):
+                if not isinstance(item, dict):
+                    raise ValueError(f"Input {i} must be a dictionary")
+                if "question" not in item:
+                    raise ValueError(f"Input {i} missing 'question' field")
+                if "context" not in item:
+                    raise ValueError(f"Input {i} missing 'context' field")
             
-            return input_data
+            # Process each input in the batch
+            processed_inputs = []
+            for item in input_data["inputs"]:
+                processed = process_single_input(item["question"], item["context"])
+                processed_inputs.append(processed)
+            
+            # Stack tensors for batch processing
+            return {
+                "input_ids": torch.stack([p["input_ids"] for p in processed_inputs]),
+                "attention_mask": torch.stack([p["attention_mask"] for p in processed_inputs]),
+                "token_type_ids": torch.stack([p["token_type_ids"] for p in processed_inputs]),
+                "sentence_ids": torch.stack([p["sentence_ids"] for p in processed_inputs])
+            }
+        else:
+            # Single input format
+            if "question" not in input_data:
+                raise ValueError("Missing 'question' field in input")
+            if "context" not in input_data:
+                raise ValueError("Missing 'context' field in input")
+            
+            return process_single_input(input_data["question"], input_data["context"])
+    else:
         raise ValueError(f"Unsupported content type: {request_content_type}")
-    except Exception as e:
-        logger.error(f"Error processing input: {str(e)}", exc_info=True)
-        raise
+
+def process_single_input(question, context):
+    """
+    Process a single question-context pair into model inputs.
+    
+    Parameters
+    ----------
+    question : str
+        The question text
+    context : str
+        The context text
+        
+    Returns
+    -------
+    dict
+        Dictionary containing the processed input tensors
+    """
+    # Split context into sentences
+    sentences = nltk.sent_tokenize(context)
+    
+    # Tokenize question and context
+    tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+    inputs = tokenizer(
+        question,
+        context,
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        max_length=512
+    )
+    
+    # Map word-level sentence IDs to token-level IDs
+    sentence_ids = []
+    current_sentence = 0
+    for token in tokenizer.tokenize(context):
+        if token in ["[CLS]", "[SEP]", "[PAD]"]:
+            sentence_ids.append(-100)
+        else:
+            sentence_ids.append(current_sentence)
+            if token.endswith(".") or token.endswith("!") or token.endswith("?"):
+                current_sentence += 1
+    
+    # Pad sentence_ids to match input length
+    sentence_ids = [-100] + sentence_ids + [-100] * (inputs["input_ids"].size(1) - len(sentence_ids) - 1)
+    
+    return {
+        "input_ids": inputs["input_ids"],
+        "attention_mask": inputs["attention_mask"],
+        "token_type_ids": inputs["token_type_ids"],
+        "sentence_ids": torch.tensor([sentence_ids])
+    }
 
 def predict_fn(input_data, model):
-    """Apply model to the input data"""
-    try:
-        # Get input data
-        question = input_data['question']
-        context = input_data['context']
+    """
+    Apply model to the input data.
+    
+    Parameters
+    ----------
+    input_data : dict
+        Dictionary containing the input tensors
+    model : torch.jit.ScriptModule
+        The loaded model
         
-        # Determine device for tensor operations
-        device = next(model.parameters()).device
-        logger.info(f"Model device detected: {device} - Moving tensors to this device for inference")
-        
-        # Step 1: Split context into sentences and assign sentence IDs
-        sent_list = nltk.sent_tokenize(context)
-        
-        # Store original sentence positions
-        sentence_positions = []
-        current_pos = 0
-        for sent in sent_list:
-            start_pos = context.find(sent, current_pos)
-            if start_pos == -1:  # If not found, use current position
-                start_pos = current_pos
-            end_pos = start_pos + len(sent)
-            sentence_positions.append((start_pos, end_pos))
-            current_pos = end_pos
-        
-        word_level_sentence_ids = []
-        for i, sent in enumerate(sent_list):
-            sent_words = sent.split(' ')
-            word_level_sentence_ids.extend([i] * len(sent_words))
-        
-        # Step 2: Tokenize question and context
-        tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
-        question_words = question.split(' ')
-        context_words = context.split(' ')
-        
-        tokenized_examples = tokenizer(
-            question_words,
-            context_words,
-            truncation="only_second",
-            max_length=512,
-            stride=128,
-            return_overflowing_tokens=True,
-            padding=False,
-            is_split_into_words=True,
+    Returns
+    -------
+    dict
+        Dictionary containing the prediction results
+    """
+    # Get model predictions
+    with torch.no_grad():
+        predictions = model(
+            input_data["input_ids"],
+            input_data["attention_mask"],
+            input_data["token_type_ids"],
+            input_data["sentence_ids"]
         )
-        
-        # Step 3: Map word-level sentence IDs to token-level sentence IDs
-        sample_mapping = tokenized_examples.pop("overflow_to_sample_mapping")
-        n_chunks = len(sample_mapping)
-        sentence_ids = []
-        
-        for i in range(n_chunks):
-            logger.info(f"Processing chunk {i+1}/{n_chunks}")
-            # Find where the context starts
-            sequence_ids = tokenized_examples.sequence_ids(i)
-            token_start_index = 0
-            while sequence_ids[token_start_index] != 1:
-                token_start_index += 1
-            chunk_sentences_ids = [-100] * token_start_index
-            
-            # Map word-level IDs to token-level IDs
-            word_ids = tokenized_examples.word_ids(i)
-            for word_idx in word_ids[token_start_index:]:
-                if word_idx is not None:
-                    chunk_sentences_ids.append(word_level_sentence_ids[word_idx])
-                else:
-                    chunk_sentences_ids.append(-100)
-            
-            sentence_ids += [chunk_sentences_ids]
-        
-        tokenized_examples['sentence_ids'] = sentence_ids
-        
-        # Step 4: Run through model and get output
-        highlight_sentences = []
-        for i in range(n_chunks):
-            input_ids = torch.LongTensor([tokenized_examples['input_ids'][i]]).to(device)
-            attention_mask = torch.LongTensor([tokenized_examples['attention_mask'][i]]).to(device)
-            token_type_ids = torch.LongTensor([tokenized_examples['token_type_ids'][i]]).to(device)
-            sentence_ids = torch.LongTensor([tokenized_examples['sentence_ids'][i]]).to(device)
-            
-            with torch.no_grad():
-                output = model(input_ids, attention_mask, token_type_ids, sentence_ids)
-            
-            for x in output:
-                highlight_sentences.extend(x.tolist())
-        
-        
-        # Step 5: Format output with positions
-        highlighted_sentences = []
-        for h in highlight_sentences:
-            highlight_words = [c for c, s in zip(context_words, word_level_sentence_ids) if s == h]
-            sentence = ' '.join(highlight_words)
-            start_pos, end_pos = sentence_positions[h]
-            highlighted_sentences.append({
-                'text': sentence,
-                'start': start_pos,
-                'end': end_pos,
-                'position': h
+    
+    # Process predictions
+    if isinstance(predictions, tuple):
+        # Batch input case
+        results = []
+        for i, pred in enumerate(predictions):
+            results.append({
+                "highlighted_sentences": pred.tolist()
             })
-
-        return highlighted_sentences
-        
-    except Exception as e:
-        logger.error(f"Error in prediction: {str(e)}", exc_info=True)
-        raise
+        return {"results": results}
+    else:
+        # Single input case
+        return {
+            "highlighted_sentences": predictions.tolist()
+        }
 
 def output_fn(prediction_output, response_content_type):
     """

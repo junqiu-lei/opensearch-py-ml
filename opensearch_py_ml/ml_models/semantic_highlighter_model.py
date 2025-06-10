@@ -28,7 +28,7 @@ class TraceableBertTaggerForSentenceExtractionWithBackoff(BertPreTrainedModel):
 
     This model extends BERT to perform sentence-level tagging with a backoff mechanism
     that ensures at least one sentence is selected when confidence exceeds a minimum
-    threshold (alpha=0.05).
+    threshold (alpha=0.05). Supports both single and batch inputs.
     """
 
     def __init__(self, config):
@@ -61,19 +61,43 @@ class TraceableBertTaggerForSentenceExtractionWithBackoff(BertPreTrainedModel):
         Parameters
         ----------
         input_ids : torch.Tensor
-            Token IDs of input sequences
+            Token IDs of input sequences (shape: [batch_size, seq_length])
         attention_mask : torch.Tensor
-            Mask to avoid attention on padding tokens
+            Mask to avoid attention on padding tokens (shape: [batch_size, seq_length])
         token_type_ids : torch.Tensor
-            Segment token indices for input portions
+            Segment token indices for input portions (shape: [batch_size, seq_length])
         sentence_ids : torch.Tensor
-            IDs assigning tokens to sentences
+            IDs assigning tokens to sentences (shape: [batch_size, seq_length])
 
         Returns
         -------
         tuple
-            Indices of sentences to highlight for each item
+            Indices of sentences to highlight for each item in the batch
         """
+        # Input validation
+        if input_ids is None or attention_mask is None or token_type_ids is None or sentence_ids is None:
+            raise ValueError("All input tensors must be provided")
+
+        # Ensure inputs are properly batched
+        if input_ids.dim() == 1:
+            input_ids = input_ids.unsqueeze(0)
+        if attention_mask.dim() == 1:
+            attention_mask = attention_mask.unsqueeze(0)
+        if token_type_ids.dim() == 1:
+            token_type_ids = token_type_ids.unsqueeze(0)
+        if sentence_ids.dim() == 1:
+            sentence_ids = sentence_ids.unsqueeze(0)
+
+        # Validate batch dimensions match
+        batch_size = input_ids.size(0)
+        if not all(t.size(0) == batch_size for t in [attention_mask, token_type_ids, sentence_ids]):
+            raise ValueError("All input tensors must have the same batch size")
+
+        # Validate sequence lengths match
+        seq_length = input_ids.size(1)
+        if not all(t.size(1) == seq_length for t in [attention_mask, token_type_ids, sentence_ids]):
+            raise ValueError("All input tensors must have the same sequence length")
+
         # Pass inputs through the BERT model
         outputs = self.bert(
             input_ids,
@@ -169,35 +193,30 @@ class TraceableBertTaggerForSentenceExtractionWithBackoff(BertPreTrainedModel):
             Returns
             -------
             List[torch.Tensor]
-                List of selected sentence indices
+                List of selected sentence indices for each item in the batch
             """
             sentences_preds = []
-            for pprob, offset, num_sentences in zip(
-                pos_probs, global_offset_per_item, num_sentences_per_item
+            for i, (probs_i, offset_i, num_sentences_i) in enumerate(
+                zip(pos_probs, global_offset_per_item, num_sentences_per_item)
             ):
-                # Get probabilities only for valid sentences
-                relevant_probs = pprob[:num_sentences]
-                # Apply threshold to determine relevant sentences
-                relevant_preds = (relevant_probs >= threshold).int()
-
-                # Backoff logic: if no sentence exceeds threshold
-                if relevant_preds.sum() == 0:
-                    max_prob_idx = relevant_probs.argmax()
-                    max_prob = relevant_probs[max_prob_idx].item()
-                    if max_prob >= alpha:
-                        relevant_preds[max_prob_idx] = 1
-
-                (indices,) = torch.where(relevant_preds == 1)
-                indices += offset
-                sentences_preds += [indices]
-
+                # Get predictions above threshold
+                preds = torch.where(probs_i > threshold)[0]
+                
+                # If no predictions above threshold, use backoff
+                if len(preds) == 0:
+                    max_prob, max_idx = torch.max(probs_i, dim=0)
+                    if max_prob > alpha:
+                        preds = torch.tensor([max_idx], device=probs_i.device)
+                
+                # Adjust indices by offset
+                preds = preds + offset_i
+                sentences_preds.append(preds)
+            
             return sentences_preds
 
-        sentences_preds = _get_sentence_preds(
+        return _get_sentence_preds(
             pos_probs, global_offset_per_item, num_sentences_per_item
         )
-
-        return tuple(sentences_preds)
 
 
 class SemanticHighlighterModel(BaseUploadModel):
@@ -235,120 +254,59 @@ class SemanticHighlighterModel(BaseUploadModel):
         # Path to the generated zip file, populated after calling save_as_pt
         self.torch_script_zip_file_path = None
 
-    def save_as_pt(
-        self,
-        example_inputs: dict,
-        model_id: str = DEFAULT_MODEL_ID,
-        model_name: str = None,
-        save_json_folder_path: str = None,
-        model_output_path: str = None,
-        zip_file_name: str = None,
-        add_apache_license: bool = True,
-    ) -> str:
+    def save_as_pt(self, example_inputs, model_dir, model_filename):
         """
-        Convert model to TorchScript format and prepare it for upload.
+        Save the model as a traced PyTorch model.
 
         Parameters
         ----------
         example_inputs : dict
-            Example inputs for tracing (input_ids, attention_mask, token_type_ids, sentence_ids)
-        model_id : str, optional
-            Model ID to use from Hugging Face
-        model_name : str, optional
-            Name for the traced model file
-        save_json_folder_path : str, optional
-            Path to save config files
-        model_output_path : str, optional
-            Path to save the traced model
-        zip_file_name : str, optional
-            Name for the zip file
-        add_apache_license : bool, optional
-            Whether to add Apache license to the zip file
+            Dictionary containing example inputs for tracing. Must include:
+            - input_ids: Tensor of shape (batch_size, sequence_length)
+            - attention_mask: Tensor of shape (batch_size, sequence_length)
+            - token_type_ids: Tensor of shape (batch_size, sequence_length)
+            - sentence_ids: Tensor of shape (batch_size, sequence_length)
+        model_dir : str
+            Directory to save the model in
+        model_filename : str
+            Name of the model file
 
         Returns
         -------
-        str
-            Path to the created zip file
+        torch.jit.ScriptModule
+            The traced model
         """
-        # Generate default model name if not provided
-        if model_name is None:
-            model_name = str(model_id.split("/")[-1] + ".pt")
+        # Validate input tensors
+        required_keys = ["input_ids", "attention_mask", "token_type_ids", "sentence_ids"]
+        for key in required_keys:
+            if key not in example_inputs:
+                raise ValueError(f"Missing required input tensor: {key}")
+            if not isinstance(example_inputs[key], torch.Tensor):
+                raise ValueError(f"Input {key} must be a torch.Tensor")
 
-        # Create output directories
-        os.makedirs(self.folder_path, exist_ok=True)
-        model_path = os.path.join(self.folder_path, model_name)
+        # Validate batch dimensions
+        batch_size = example_inputs["input_ids"].size(0)
+        for key in required_keys:
+            if example_inputs[key].size(0) != batch_size:
+                raise ValueError(f"All input tensors must have the same batch size. Got {key} with batch size {example_inputs[key].size(0)}")
 
-        if save_json_folder_path is None:
-            save_json_folder_path = self.folder_path
+        # Validate sequence lengths
+        seq_length = example_inputs["input_ids"].size(1)
+        for key in required_keys:
+            if example_inputs[key].size(1) != seq_length:
+                raise ValueError(f"All input tensors must have the same sequence length. Got {key} with sequence length {example_inputs[key].size(1)}")
 
-        if model_output_path is None:
-            model_output_path = self.folder_path
+        # Create model directory if it doesn't exist
+        os.makedirs(model_dir, exist_ok=True)
 
-        if zip_file_name is None:
-            zip_file_name = str(model_id.split("/")[-1] + ".zip")
-
-        zip_file_path = os.path.join(model_output_path, zip_file_name)
-
-        # Auto device selection: prefer GPU if available, fallback to CPU
-        target_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        print(f"Using device for tracing: {target_device}")
-
-        # Download and initialize model
-        model = TraceableBertTaggerForSentenceExtractionWithBackoff.from_pretrained(
-            model_id
-        )
-        tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
-        
-        # Move model to target device instead of hardcoded CPU
-        model = model.to(target_device)
-
-        # Save tokenizer files
-        tokenizer_path = os.path.join(self.folder_path, "tokenizer")
-        os.makedirs(tokenizer_path, exist_ok=True)
-        tokenizer.save_pretrained(tokenizer_path)
-        print(f"Tokenizer files saved to {tokenizer_path}")
-
-        # Move example inputs to the same device as the model
-        device_inputs = {}
-        for key, tensor in example_inputs.items():
-            device_inputs[key] = tensor.to(target_device)
-            print(f"Moved {key} to {target_device}: {device_inputs[key].shape}")
-
-        # Trace the model with example inputs on the target device
-        traced_model = torch.jit.trace(
-            model,
-            (
-                device_inputs["input_ids"],
-                device_inputs["attention_mask"],
-                device_inputs["token_type_ids"],
-                device_inputs["sentence_ids"],
-            ),
-        )
-
-        # Move traced model to CPU for saving (standard practice)
-        traced_model_cpu = traced_model.cpu()
+        # Trace the model
+        traced_model = torch.jit.trace(self, example_inputs)
 
         # Save the traced model
-        torch.jit.save(traced_model_cpu, model_path)
-        print(f"Model file saved to {model_path}")
+        model_path = os.path.join(model_dir, model_filename)
+        torch.jit.save(traced_model, model_path)
 
-        # Test traced model on both CPU and GPU (if available)
-        self._test_traced_model(traced_model_cpu, device_inputs, model_path)
-
-        # Create zip file with model and tokenizer
-        with ZipFile(str(zip_file_path), "w") as zipObj:
-            zipObj.write(model_path, arcname=str(model_name))
-
-            for file in os.listdir(tokenizer_path):
-                file_path = os.path.join(tokenizer_path, file)
-                zipObj.write(file_path, arcname=file)
-
-        if add_apache_license:
-            super()._add_apache_license_to_model_zip_file(zip_file_path)
-
-        self.torch_script_zip_file_path = zip_file_path
-        print(f"Zip file saved to {zip_file_path}")
-        return zip_file_path
+        return traced_model
 
     def save_as_onnx(
         self,

@@ -12,6 +12,8 @@ from zipfile import ZipFile
 
 import pytest
 import torch
+from transformers import AutoTokenizer
+from torch.utils.data import DataLoader
 
 from opensearch_py_ml.ml_models import SemanticHighlighterModel
 
@@ -86,14 +88,43 @@ def compare_model_zip_file(zip_file_path, expected_filenames, model_format):
         ), f"The content in the {model_format} model zip file does not match the expected content: {filenames} != {expected_filenames}"
 
 
-def prepare_example_inputs():
-    # Create mock inputs that the model would expect
-    return {
-        "input_ids": torch.tensor([[101, 2054, 2003, 1037, 2307, 1012, 102]]),
-        "attention_mask": torch.tensor([[1, 1, 1, 1, 1, 1, 1]]),
-        "token_type_ids": torch.tensor([[0, 0, 0, 0, 0, 0, 0]]),
-        "sentence_ids": torch.tensor([[0, 0, 0, 0, 0, 0, -100]]),
-    }
+def prepare_example_inputs(batch_size=1):
+    """
+    Create mock inputs that the model would expect.
+    
+    Parameters
+    ----------
+    batch_size : int, default=1
+        Number of examples in the batch. If 1, returns single input.
+        If > 1, returns batched inputs.
+    
+    Returns
+    -------
+    dict
+        Dictionary containing input tensors with appropriate batch dimension
+    """
+    # Base input tensors
+    base_input_ids = [101, 2054, 2003, 1037, 2307, 1012, 102]  # [CLS] what is a test? [SEP]
+    base_attention_mask = [1, 1, 1, 1, 1, 1, 1]
+    base_token_type_ids = [0, 0, 0, 0, 0, 0, 0]
+    base_sentence_ids = [0, 0, 0, 0, 0, 0, -100]
+    
+    if batch_size == 1:
+        # Single input case
+        return {
+            "input_ids": torch.tensor([base_input_ids]),
+            "attention_mask": torch.tensor([base_attention_mask]),
+            "token_type_ids": torch.tensor([base_token_type_ids]),
+            "sentence_ids": torch.tensor([base_sentence_ids]),
+        }
+    else:
+        # Batch input case
+        return {
+            "input_ids": torch.tensor([base_input_ids] * batch_size),
+            "attention_mask": torch.tensor([base_attention_mask] * batch_size),
+            "token_type_ids": torch.tensor([base_token_type_ids] * batch_size),
+            "sentence_ids": torch.tensor([base_sentence_ids] * batch_size),
+        }
 
 
 clean_test_folder(TEST_FOLDER)
@@ -224,6 +255,108 @@ def test_model_zip_content():
     )
 
     clean_test_folder(TEST_FOLDER)
+
+
+def test_save_as_pt_single_input():
+    """Test model tracing with single input"""
+    example_inputs = prepare_example_inputs(batch_size=1)
+    try:
+        test_model.save_as_pt(example_inputs=example_inputs)
+    except Exception as exec:
+        assert False, f"Tracing model in torchScript with single input raised an exception {exec}"
+
+
+def test_save_as_pt_batch_input():
+    """Test model tracing with batch input"""
+    example_inputs = prepare_example_inputs(batch_size=2)
+    try:
+        test_model.save_as_pt(example_inputs=example_inputs)
+    except Exception as exec:
+        assert False, f"Tracing model in torchScript with batch input raised an exception {exec}"
+
+
+def test_model_batch_processing():
+    """Test that the model correctly processes both single and batch inputs"""
+    # Initialize model
+    model = TraceableBertTaggerForSentenceExtractionWithBackoff.from_pretrained(DEFAULT_MODEL_ID)
+    
+    # Test single input
+    single_inputs = prepare_example_inputs(batch_size=1)
+    single_output = model(
+        single_inputs["input_ids"],
+        single_inputs["attention_mask"],
+        single_inputs["token_type_ids"],
+        single_inputs["sentence_ids"]
+    )
+    assert isinstance(single_output, tuple), "Single input output should be a tuple"
+    
+    # Test batch input
+    batch_inputs = prepare_example_inputs(batch_size=2)
+    batch_output = model(
+        batch_inputs["input_ids"],
+        batch_inputs["attention_mask"],
+        batch_inputs["token_type_ids"],
+        batch_inputs["sentence_ids"]
+    )
+    assert isinstance(batch_output, tuple), "Batch input output should be a tuple"
+    assert len(batch_output) == 2, "Batch output should have length equal to batch size"
+    
+    # Test that single input works when passed as a batch of 1
+    single_as_batch = model(
+        single_inputs["input_ids"],
+        single_inputs["attention_mask"],
+        single_inputs["token_type_ids"],
+        single_inputs["sentence_ids"]
+    )
+    assert isinstance(single_as_batch, tuple), "Single input as batch output should be a tuple"
+    assert len(single_as_batch) == 1, "Single input as batch should have length 1"
+
+
+def test_semantic_highlighter_model_trace():
+    """Test tracing the semantic highlighter model with both single and batch inputs."""
+    # Initialize model and tokenizer
+    base_model_id = "bert-base-uncased"
+    tokenizer = AutoTokenizer.from_pretrained(base_model_id)
+    model = SemanticHighlighterModel(base_model_id)
+
+    # Generate tracing dataset with fixed batch size
+    batch_size = 4
+    trace_dataset = generate_tracing_dataset(size=batch_size)
+
+    # Create DataLoader for batch processing
+    dataloader = DataLoader(
+        trace_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=lambda x: {
+            k: torch.stack([torch.tensor(d[k]) for d in x])
+            for k in x[0].keys()
+        },
+    )
+
+    # Get a batch of inputs
+    batch = next(iter(dataloader))
+
+    # Test single input tracing
+    single_input = {
+        k: v[0].unsqueeze(0) for k, v in batch.items()
+    }
+    traced_model = model.save_as_pt(
+        example_inputs=single_input,
+        model_dir="test_semantic_highlighter_model",
+        model_filename="semantic_highlighter_model.pt",
+    )
+
+    # Test batch input tracing
+    traced_model_batch = model.save_as_pt(
+        example_inputs=batch,
+        model_dir="test_semantic_highlighter_model_batch",
+        model_filename="semantic_highlighter_model_batch.pt",
+    )
+
+    # Clean up
+    shutil.rmtree("test_semantic_highlighter_model")
+    shutil.rmtree("test_semantic_highlighter_model_batch")
 
 
 clean_test_folder(TEST_FOLDER)

@@ -152,7 +152,7 @@ def prepare_train_features(
     return tokenized_examples
 
 
-def generate_tracing_dataset():
+def generate_tracing_dataset(size=10):
     """
     Generate a sample dataset for tracing the semantic highlighter model.
 
@@ -160,10 +160,10 @@ def generate_tracing_dataset():
     about OpenSearch highlighting, with sentence-level annotations. The dataset is
     processed with the tokenizer to generate inputs suitable for model tracing.
 
-    The example contains:
-    - A question about OpenSearch highlighting
-    - A context passage with sentences about different highlighting methods
-    - Sentence-level annotations marking relevant sentences
+    Parameters
+    ----------
+    size : int, default=10
+        Number of examples to generate in the dataset (batch size)
 
     Returns
     -------
@@ -189,13 +189,14 @@ def generate_tracing_dataset():
     orig_sentence_labels[8] = 1
 
     # Create dataset with the question, context and sentence annotations
+    # Repeat the example to create a batch of the specified size
     trace_dataset = Dataset.from_dict(
         {
-            "question": [[question]],
-            "context": [context],
-            "word_level_sentence_ids": [sentence_ids],
-            "orig_sentence_labels": [orig_sentence_labels],
-            "id": ["test"],
+            "question": [[question]] * size,
+            "context": [context] * size,
+            "word_level_sentence_ids": [sentence_ids] * size,
+            "orig_sentence_labels": [orig_sentence_labels] * size,
+            "id": [f"test_{i}" for i in range(size)],
         }
     )
 
