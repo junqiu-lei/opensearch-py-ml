@@ -8,7 +8,9 @@ import tarfile
 import requests
 import zipfile
 import json
+import argparse
 from datetime import datetime
+from dataclasses import dataclass
 from sagemaker.pytorch import PyTorchModel
 from sagemaker.serializers import JSONSerializer
 from sagemaker.deserializers import JSONDeserializer
@@ -20,8 +22,198 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Get configuration from environment variables
-INSTANCE_TYPE = os.getenv('INSTANCE_TYPE', 'ml.g5.xlarge')
+@dataclass
+class ScalingConfig:
+    """Configuration for SageMaker endpoint scaling"""
+    instance_type: str = 'ml.g5.xlarge'
+    initial_instance_count: int = 1
+    min_instance_count: int = 1
+    max_instance_count: int = 10
+    target_invocations_per_instance: int = 10000
+    target_cpu_utilization: float = 70.0
+    target_gpu_utilization: float = 60.0
+    auto_scaling_enabled: bool = True
+    resource_scaling_only: bool = False
+    
+    @classmethod
+    def from_environment(cls):
+        """Create configuration from environment variables"""
+        return cls(
+            instance_type=os.getenv('INSTANCE_TYPE', 'ml.g5.xlarge'),
+            initial_instance_count=int(os.getenv('INITIAL_INSTANCE_COUNT', '1')),
+            min_instance_count=int(os.getenv('MIN_INSTANCE_COUNT', '1')),
+            max_instance_count=int(os.getenv('MAX_INSTANCE_COUNT', '10')),
+            target_invocations_per_instance=int(os.getenv('TARGET_INVOCATIONS_PER_INSTANCE', '500')),
+            target_cpu_utilization=float(os.getenv('TARGET_CPU_UTILIZATION', '70.0')),
+            target_gpu_utilization=float(os.getenv('TARGET_GPU_UTILIZATION', '60.0')),
+            auto_scaling_enabled=os.getenv('AUTO_SCALING_ENABLED', 'true').lower() == 'true',
+            resource_scaling_only=os.getenv('RESOURCE_SCALING_ONLY', 'false').lower() == 'true'
+        )
+    
+    def validate(self):
+        """Validate the scaling configuration"""
+        if self.min_instance_count > self.initial_instance_count:
+            raise ValueError(f"Min instances ({self.min_instance_count}) cannot be greater than initial instances ({self.initial_instance_count})")
+        
+        if self.initial_instance_count > self.max_instance_count:
+            raise ValueError(f"Initial instances ({self.initial_instance_count}) cannot be greater than max instances ({self.max_instance_count})")
+        
+        if self.min_instance_count < 1:
+            raise ValueError(f"Min instances must be at least 1, got {self.min_instance_count}")
+        
+        if self.max_instance_count < 1:
+            raise ValueError(f"Max instances must be at least 1, got {self.max_instance_count}")
+        
+        if self.target_invocations_per_instance < 1:
+            raise ValueError(f"Target invocations per instance must be at least 1, got {self.target_invocations_per_instance}")
+        
+        if not (0 < self.target_cpu_utilization <= 100):
+            raise ValueError(f"Target CPU utilization must be between 0 and 100, got {self.target_cpu_utilization}")
+            
+        if not (0 < self.target_gpu_utilization <= 100):
+            raise ValueError(f"Target GPU utilization must be between 0 and 100, got {self.target_gpu_utilization}")
+        
+        # Validate instance type format
+        if not self.instance_type.startswith('ml.'):
+            raise ValueError(f"Instance type must start with 'ml.', got {self.instance_type}")
+        
+        logger.info("Scaling configuration validated successfully")
+    
+    def print_config(self):
+        """Print the current scaling configuration"""
+        logger.info("=" * 60)
+        logger.info("SCALING CONFIGURATION")
+        logger.info("=" * 60)
+        logger.info(f"Instance Type: {self.instance_type}")
+        logger.info(f"Initial Instance Count: {self.initial_instance_count}")
+        logger.info(f"Auto-scaling Enabled: {self.auto_scaling_enabled}")
+        logger.info(f"Resource Scaling Only: {self.resource_scaling_only}")
+        
+        if self.auto_scaling_enabled:
+            logger.info(f"Min Instance Count: {self.min_instance_count}")
+            logger.info(f"Max Instance Count: {self.max_instance_count}")
+            logger.info(f"Target CPU Utilization: {self.target_cpu_utilization}%")
+            logger.info(f"Target GPU Utilization: {self.target_gpu_utilization}%")
+            
+            if self.resource_scaling_only:
+                logger.info("Target Invocations: DISABLED (Resource scaling only)")
+            else:
+                logger.info(f"Target Invocations Per Instance: {self.target_invocations_per_instance}")
+        
+        logger.info("=" * 60)
+
+def parse_arguments():
+    """Parse command line arguments"""
+    # Get default config from environment
+    default_config = ScalingConfig.from_environment()
+    
+    parser = argparse.ArgumentParser(
+        description="Deploy SageMaker Sentence Highlighter with configurable scaling",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Deploy with default settings (resource-based scaling enabled)
+  python deploy.py
+  
+  # Deploy with resource-only scaling (NO invocation-based scaling)
+  python deploy.py --resource-scaling-only --target-cpu-utilization 60 --target-gpu-utilization 50
+  
+  # Deploy with high performance setup - aggressive resource scaling
+  python deploy.py --instance-type ml.g5.2xlarge --initial-instances 3 --max-instances 20 --target-cpu-utilization 50 --target-gpu-utilization 40
+  
+  # Deploy without auto-scaling (single instance)
+  python deploy.py --instance-type ml.g5.xlarge --initial-instances 1 --no-auto-scaling
+  
+  # Deploy for batch inference workloads (your use case)
+  python deploy.py --resource-scaling-only --instance-type ml.g5.xlarge --initial-instances 2 --max-instances 6 --target-cpu-utilization 65 --target-gpu-utilization 55
+        """
+    )
+    
+    parser.add_argument(
+        '--instance-type',
+        default=default_config.instance_type,
+        help=f'SageMaker instance type (default: {default_config.instance_type})'
+    )
+    
+    parser.add_argument(
+        '--initial-instances',
+        type=int,
+        default=default_config.initial_instance_count,
+        help=f'Initial number of instances (default: {default_config.initial_instance_count})'
+    )
+    
+    parser.add_argument(
+        '--min-instances',
+        type=int,
+        default=default_config.min_instance_count,
+        help=f'Minimum number of instances for auto-scaling (default: {default_config.min_instance_count})'
+    )
+    
+    parser.add_argument(
+        '--max-instances',
+        type=int,
+        default=default_config.max_instance_count,
+        help=f'Maximum number of instances for auto-scaling (default: {default_config.max_instance_count})'
+    )
+    
+    parser.add_argument(
+        '--target-invocations',
+        type=int,
+        default=default_config.target_invocations_per_instance,
+        help=f'Target invocations per instance for scaling (default: {default_config.target_invocations_per_instance})'
+    )
+    
+    parser.add_argument(
+        '--target-cpu-utilization',
+        type=float,
+        default=default_config.target_cpu_utilization,
+        help=f'Target CPU utilization percentage for scaling (default: {default_config.target_cpu_utilization})'
+    )
+    
+    parser.add_argument(
+        '--target-gpu-utilization',
+        type=float,
+        default=default_config.target_gpu_utilization,
+        help=f'Target GPU utilization percentage for scaling (default: {default_config.target_gpu_utilization})'
+    )
+    
+    parser.add_argument(
+        '--resource-scaling-only',
+        action='store_true',
+        help='Use only CPU/GPU resource scaling, disable invocation-based scaling'
+    )
+    
+    parser.add_argument(
+        '--no-auto-scaling',
+        action='store_true',
+        help='Disable auto-scaling'
+    )
+    
+    return parser.parse_args()
+
+def setup_scaling_config(args):
+    """Setup scaling configuration based on arguments"""
+    # Start with defaults from environment
+    default_config = ScalingConfig.from_environment()
+    
+    # Create configuration with arguments, using defaults as fallback
+    config = ScalingConfig(
+        instance_type=args.instance_type if args.instance_type else default_config.instance_type,
+        initial_instance_count=args.initial_instances,
+        min_instance_count=args.min_instances,
+        max_instance_count=args.max_instances,
+        target_invocations_per_instance=args.target_invocations,
+        target_cpu_utilization=args.target_cpu_utilization,
+        target_gpu_utilization=args.target_gpu_utilization,
+        auto_scaling_enabled=not args.no_auto_scaling if args.no_auto_scaling else default_config.auto_scaling_enabled,
+        resource_scaling_only=args.resource_scaling_only
+    )
+    
+    # Validate the configuration
+    config.validate()
+    
+    logger.info("Scaling configuration setup completed")
+    return config
 
 def get_endpoint_name():
     """Generate a unique endpoint name with timestamp"""
@@ -212,8 +404,116 @@ def test_endpoint(endpoint_name):
         logger.error("This indicates there may be an issue with the deployment")
         return False
 
-def deploy_model():
+def setup_auto_scaling(endpoint_name, config: ScalingConfig, variant_name='AllTraffic'):
+    """Configure auto-scaling for the endpoint"""
     try:
+        logger.info("Setting up auto-scaling for the endpoint...")
+        
+        # Create auto-scaling client
+        autoscaling_client = boto3.client('application-autoscaling')
+        
+        # Register scalable target
+        resource_id = f"endpoint/{endpoint_name}/variant/{variant_name}"
+        
+        logger.info(f"Registering scalable target: {resource_id}")
+        logger.info(f"Min capacity: {config.min_instance_count}, Max capacity: {config.max_instance_count}")
+        
+        autoscaling_client.register_scalable_target(
+            ServiceNamespace='sagemaker',
+            ResourceId=resource_id,
+            ScalableDimension='sagemaker:variant:DesiredInstanceCount',
+            MinCapacity=config.min_instance_count,
+            MaxCapacity=config.max_instance_count
+        )
+        
+        # Create CPU utilization scaling policy (PRIMARY)
+        cpu_policy_name = f"{endpoint_name}-cpu-scaling-policy"
+        logger.info(f"Creating CPU utilization scaling policy: {cpu_policy_name}")
+        logger.info(f"Target CPU utilization: {config.target_cpu_utilization}%")
+        
+        autoscaling_client.put_scaling_policy(
+            PolicyName=cpu_policy_name,
+            ServiceNamespace='sagemaker',
+            ResourceId=resource_id,
+            ScalableDimension='sagemaker:variant:DesiredInstanceCount',
+            PolicyType='TargetTrackingScaling',
+            TargetTrackingScalingPolicyConfiguration={
+                'TargetValue': config.target_cpu_utilization,
+                'PredefinedMetricSpecification': {
+                    'PredefinedMetricType': 'SageMakerVariantCPUUtilization'
+                },
+                'ScaleOutCooldown': 240,  # Faster scale-out for resource pressure
+                'ScaleInCooldown': 480    # Conservative scale-in
+            }
+        )
+        
+        logger.info("CPU utilization scaling policy configured")
+        
+        # Create GPU utilization scaling policy (SECONDARY) if instance supports GPU
+        if 'g4' in config.instance_type or 'g5' in config.instance_type or 'p3' in config.instance_type or 'p4' in config.instance_type:
+            gpu_policy_name = f"{endpoint_name}-gpu-scaling-policy"
+            logger.info(f"Creating GPU utilization scaling policy: {gpu_policy_name}")
+            logger.info(f"Target GPU utilization: {config.target_gpu_utilization}%")
+            
+            autoscaling_client.put_scaling_policy(
+                PolicyName=gpu_policy_name,
+                ServiceNamespace='sagemaker',
+                ResourceId=resource_id,
+                ScalableDimension='sagemaker:variant:DesiredInstanceCount',
+                PolicyType='TargetTrackingScaling',
+                TargetTrackingScalingPolicyConfiguration={
+                    'TargetValue': config.target_gpu_utilization,
+                    'PredefinedMetricSpecification': {
+                        'PredefinedMetricType': 'SageMakerVariantGPUUtilization'
+                    },
+                    'ScaleOutCooldown': 300,
+                    'ScaleInCooldown': 600
+                }
+            )
+            
+            logger.info("GPU utilization scaling policy configured")
+        else:
+            logger.info("Instance type doesn't support GPU - skipping GPU scaling policy")
+        
+        # Only add invocation-based scaling if NOT in resource-only mode
+        if not config.resource_scaling_only:
+            policy_name = f"{endpoint_name}-invocation-scaling-policy"
+            logger.info(f"Creating invocation-based scaling policy: {policy_name}")
+            logger.info(f"Target invocations per instance: {config.target_invocations_per_instance}")
+            
+            policy_response = autoscaling_client.put_scaling_policy(
+                PolicyName=policy_name,
+                ServiceNamespace='sagemaker',
+                ResourceId=resource_id,
+                ScalableDimension='sagemaker:variant:DesiredInstanceCount',
+                PolicyType='TargetTrackingScaling',
+                TargetTrackingScalingPolicyConfiguration={
+                    'TargetValue': float(config.target_invocations_per_instance),
+                    'PredefinedMetricSpecification': {
+                        'PredefinedMetricType': 'SageMakerVariantInvocationsPerInstance'
+                    },
+                    'ScaleOutCooldown': 600,  # Slower than resource-based scaling
+                    'ScaleInCooldown': 900    # Much slower scale-in for invocations
+                }
+            )
+            
+            logger.info("Invocation-based scaling policy configured")
+            logger.info(f"Policy ARN: {policy_response['PolicyARN']}")
+        else:
+            logger.info("Resource scaling only mode - skipping invocation-based scaling")
+        
+        logger.info("Auto-scaling configured successfully")
+        logger.info("Resource-based scaling will take priority over invocation-based scaling")
+        
+    except Exception as e:
+        logger.error(f"Failed to setup auto-scaling: {str(e)}")
+        logger.warning("Continuing without auto-scaling...")
+
+def deploy_model(config: ScalingConfig):
+    try:
+        # Print scaling configuration
+        config.print_config()
+        
         # Prepare model package first
         prepare_model_package()
         
@@ -264,8 +564,8 @@ def deploy_model():
         
         try:
             predictor = model.deploy(
-                initial_instance_count=1,
-                instance_type=INSTANCE_TYPE,
+                initial_instance_count=config.initial_instance_count,
+                instance_type=config.instance_type,
                 endpoint_name=endpoint_name,
                 serializer=JSONSerializer(),
                 deserializer=JSONDeserializer()
@@ -282,9 +582,20 @@ def deploy_model():
             
             test_success = test_endpoint(endpoint_name)
             
+            # Setup auto-scaling if enabled
+            if config.auto_scaling_enabled:
+                setup_auto_scaling(endpoint_name, config)
+            else:
+                logger.info("Auto-scaling is disabled")
+            
             if test_success:
                 logger.info("Deployment and testing completed successfully!")
                 logger.info(f"Your endpoint '{endpoint_name}' is ready to use.")
+                
+                if config.auto_scaling_enabled:
+                    logger.info("Auto-scaling has been configured to handle concurrent requests")
+                    logger.info(f"The endpoint will scale between {config.min_instance_count} and {config.max_instance_count} instances")
+                    logger.info(f"based on invocations per instance (target: {config.target_invocations_per_instance}) and CPU utilization")
             else:
                 logger.warning("Deployment completed but testing failed. Check CloudWatch logs for details.")
 
@@ -297,5 +608,15 @@ def deploy_model():
         logger.error(f"An error occurred: {str(e)}")
         raise
 
+def main():
+    """Main function to handle command line arguments and deploy the model"""
+    args = parse_arguments()
+    
+    # Setup scaling configuration
+    config = setup_scaling_config(args)
+    
+    # Deploy the model
+    deploy_model(config)
+
 if __name__ == "__main__":
-    deploy_model()
+    main()

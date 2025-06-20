@@ -1,6 +1,6 @@
 # Sentence Highlighting Model Deployment
 
-This directory contains scripts for deploying the OpenSearch Sentence Highlighting model to AWS SageMaker. The deployment process automatically downloads the model from OpenSearch artifacts, packages it, and deploys it as a SageMaker endpoint.
+This directory contains scripts for deploying the OpenSearch Sentence Highlighting model to AWS SageMaker with advanced auto-scaling capabilities. The deployment process automatically downloads the model from OpenSearch artifacts, packages it, and deploys it as a SageMaker endpoint with configurable resource-based scaling.
 
 ## Prerequisites
 
@@ -13,6 +13,10 @@ This directory contains scripts for deploying the OpenSearch Sentence Highlighti
      - `sagemaker:CreateModel`
      - `sagemaker:CreateEndpoint`
      - `sagemaker:CreateEndpointConfig`
+   - **Auto-scaling Permissions**:
+     - `application-autoscaling:RegisterScalableTarget`
+     - `application-autoscaling:PutScalingPolicy`
+     - `application-autoscaling:DescribeScalingPolicies`
    - **S3 Permissions**:
      - `s3:PutObject`
      - `s3:GetObject`
@@ -49,7 +53,11 @@ This directory contains scripts for deploying the OpenSearch Sentence Highlighti
 
 3. Run the deployment script:
    ```bash
+   # Basic deployment with default resource-based scaling
    python deploy.py
+   
+   # Advanced deployment with custom scaling parameters
+   python deploy.py --resource-scaling-only --target-cpu-utilization 65 --max-instances 8
    ```
 
 The script will:
@@ -58,6 +66,87 @@ The script will:
 3. Create a SageMaker role if it doesn't exist
 4. Upload the model to the default SageMaker S3 bucket
 5. Deploy the model to a SageMaker endpoint
+6. Configure auto-scaling policies based on CPU/GPU utilization
+7. Test the deployed endpoint
+
+## Auto-Scaling Configuration
+
+The deployment script supports advanced auto-scaling based on resource utilization, perfect for handling variable workloads and batch inference scenarios.
+
+### Scaling Options
+
+```bash
+# View all available options
+python deploy.py --help
+```
+
+**Key Parameters:**
+- `--instance-type`: SageMaker instance type (default: ml.g5.xlarge)
+- `--initial-instances`: Starting number of instances (default: 1)
+- `--min-instances`: Minimum instances for auto-scaling (default: 1)
+- `--max-instances`: Maximum instances for auto-scaling (default: 10)
+- `--target-cpu-utilization`: CPU % target for scaling (default: 70)
+- `--target-gpu-utilization`: GPU % target for scaling (default: 60)
+- `--resource-scaling-only`: Use only CPU/GPU scaling, disable API request-based scaling
+- `--no-auto-scaling`: Disable auto-scaling entirely
+
+### Scaling Examples
+
+**Resource-Only Scaling (Recommended for Batch Inference):**
+```bash
+python deploy.py \
+  --resource-scaling-only \
+  --instance-type ml.g5.xlarge \
+  --initial-instances 2 \
+  --max-instances 6 \
+  --target-cpu-utilization 65 \
+  --target-gpu-utilization 55
+```
+
+**High-Performance Setup:**
+```bash
+python deploy.py \
+  --instance-type ml.g5.2xlarge \
+  --initial-instances 3 \
+  --max-instances 20 \
+  --target-cpu-utilization 50 \
+  --target-gpu-utilization 40
+```
+
+**Cost-Optimized Setup:**
+```bash
+python deploy.py \
+  --instance-type ml.g5.xlarge \
+  --initial-instances 1 \
+  --max-instances 4 \
+  --target-cpu-utilization 80 \
+  --target-gpu-utilization 70
+```
+
+**Single Instance (No Auto-scaling):**
+```bash
+python deploy.py \
+  --instance-type ml.g5.xlarge \
+  --initial-instances 1 \
+  --no-auto-scaling
+```
+
+### Scaling Behavior
+
+**Resource-Based Scaling:**
+- **Primary**: CPU utilization monitoring with 4-8 minute response times
+- **Secondary**: GPU utilization monitoring (for GPU instances)
+- **Response Times**: Fast scale-out (4 mins), conservative scale-in (8 mins)
+
+**Mixed Scaling (Default):**
+- Resource-based scaling takes priority
+- API request-based scaling as backup with slower response times
+- Best for mixed workloads
+
+**Resource-Only Mode (`--resource-scaling-only`):**
+- Completely ignores API request counts
+- Perfect for batch inference where 1 API call = many model inferences
+- Scales purely based on actual CPU/GPU resource consumption
 
 ## API Usage
 
@@ -136,16 +225,42 @@ print(result)
 You can customize the deployment using these environment variables:
 
 ### Optional Variables:
+
+**Instance Configuration:**
 - `INSTANCE_TYPE`: SageMaker instance type (default: "ml.g5.xlarge")
   - **CPU instances**: "ml.m5.xlarge", "ml.m5.2xlarge", "ml.c5.xlarge"
-  - **GPU instances**: "ml.g4dn.xlarge", "ml.g4dn.2xlarge", "ml.p3.2xlarge"
-  - Example: `export INSTANCE_TYPE="ml.g4dn.xlarge"`
+  - **GPU instances**: "ml.g4dn.xlarge", "ml.g4dn.2xlarge", "ml.g5.xlarge", "ml.p3.2xlarge"
+  - Example: `export INSTANCE_TYPE="ml.g5.xlarge"`
 
+**Scaling Configuration:**
+- `INITIAL_INSTANCE_COUNT`: Starting number of instances (default: 1)
+- `MIN_INSTANCE_COUNT`: Minimum instances for auto-scaling (default: 1)  
+- `MAX_INSTANCE_COUNT`: Maximum instances for auto-scaling (default: 10)
+- `TARGET_CPU_UTILIZATION`: CPU target percentage (default: 70.0)
+- `TARGET_GPU_UTILIZATION`: GPU target percentage (default: 60.0)
+- `TARGET_INVOCATIONS_PER_INSTANCE`: API requests target (default: 500)
+- `AUTO_SCALING_ENABLED`: Enable auto-scaling (default: true)
+- `RESOURCE_SCALING_ONLY`: Use only resource-based scaling (default: false)
+
+**AWS Configuration:**
 - `AWS_PROFILE`: AWS credentials profile (default: "default")
   - Example: `export AWS_PROFILE="my-profile"`
-
 - `AWS_REGION`: AWS region (default: from AWS configuration)
   - Example: `export AWS_REGION="us-west-2"`
+
+### Environment Variable Example:
+```bash
+# Configure for batch inference workload
+export INSTANCE_TYPE="ml.g5.xlarge"
+export INITIAL_INSTANCE_COUNT="2"
+export MAX_INSTANCE_COUNT="6"
+export TARGET_CPU_UTILIZATION="65.0"
+export TARGET_GPU_UTILIZATION="55.0"
+export RESOURCE_SCALING_ONLY="true"
+
+# Deploy with environment settings
+python deploy.py
+```
 
 ## GPU Deployment
 
@@ -184,23 +299,98 @@ Note: The script uses the default SageMaker bucket for your account (`sagemaker-
 
 ## Monitoring
 
+### Deployment Monitoring
+
 The script provides detailed logging of the deployment process. Check the logs for:
 - Download progress
 - Packaging status
 - S3 upload status
 - Deployment progress
 - Endpoint creation status
+- Auto-scaling policy configuration
+- Test results
+
+### Auto-Scaling Monitoring
+
+**AWS Console Monitoring:**
+1. Navigate to **SageMaker > Endpoints** in AWS Console
+2. Select your endpoint to view metrics:
+   - CPU Utilization
+   - GPU Utilization (for GPU instances)
+   - Invocations per instance
+   - Current instance count
+
+**CloudWatch Metrics:**
+```bash
+# View endpoint metrics using AWS CLI
+aws cloudwatch get-metric-statistics \
+  --namespace AWS/SageMaker \
+  --metric-name CPUUtilization \
+  --dimensions Name=EndpointName,Value=your-endpoint-name \
+  --start-time 2024-01-01T00:00:00Z \
+  --end-time 2024-01-01T23:59:59Z \
+  --period 300 \
+  --statistics Average
+```
+
+**Auto-Scaling Activity:**
+```bash
+# Check scaling activities
+aws application-autoscaling describe-scaling-activities \
+  --service-namespace sagemaker \
+  --resource-id endpoint/your-endpoint-name/variant/AllTraffic
+```
+
+### Performance Optimization
+
+**For Batch Inference Workloads:**
+- Use `--resource-scaling-only` to avoid API request-based scaling
+- Set conservative CPU/GPU targets (65-75%) to handle processing spikes
+- Start with 2+ instances to distribute load
+- Monitor CloudWatch for optimal target values
+
+**For Real-time Inference:**
+- Use mixed scaling (default) for balanced performance
+- Set aggressive targets (50-60%) for fast response
+- Higher instance counts for high availability
 
 ## Cleanup
 
-To avoid unnecessary charges, delete the endpoint when not needed:
+To avoid unnecessary charges, delete the endpoint and auto-scaling policies when not needed:
+
+### Quick Cleanup (SageMaker Console)
+1. Go to **SageMaker > Endpoints** in AWS Console
+2. Select your endpoint and click **Delete**
+3. Auto-scaling policies are automatically removed with the endpoint
+
+### Programmatic Cleanup
 ```python
 import boto3
+
+# Replace with your actual endpoint name
+endpoint_name = "semantic-highlighter-20240101123456"
+
+# Delete the SageMaker endpoint
 sagemaker = boto3.client('sagemaker')
-with open('endpoint_name.txt', 'r') as f:
-    endpoint_name = f.read().strip()
-sagemaker.delete_endpoint(EndpointName=endpoint_name)
+try:
+    sagemaker.delete_endpoint(EndpointName=endpoint_name)
+    print(f"Endpoint {endpoint_name} deletion initiated")
+except Exception as e:
+    print(f"Error deleting endpoint: {e}")
+
+# Auto-scaling policies are automatically cleaned up with the endpoint
 ```
+
+### CLI Cleanup
+```bash
+# Delete endpoint using AWS CLI
+aws sagemaker delete-endpoint --endpoint-name your-endpoint-name
+
+# Verify deletion
+aws sagemaker describe-endpoint --endpoint-name your-endpoint-name
+```
+
+**Note**: Deleting the endpoint automatically removes associated auto-scaling policies and targets.
 
 ## Troubleshooting
 
